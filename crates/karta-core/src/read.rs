@@ -506,8 +506,10 @@ impl ReadEngine {
             }
         }
 
-        // 3. Fetch injected notes
-        let inject_refs: Vec<&str> = contradiction_inject_ids.iter().map(|s| s.as_str()).collect();
+        // 3. Fetch injected notes (cap at 10 to bound LLM context growth)
+        let mut inject_ids_vec: Vec<&str> = contradiction_inject_ids.iter().map(|s| s.as_str()).collect();
+        inject_ids_vec.truncate(10);
+        let inject_refs = inject_ids_vec;
         let contradiction_notes: Vec<MemoryNote> = if inject_refs.is_empty() {
             Vec::new()
         } else {
