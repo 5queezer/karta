@@ -24,8 +24,12 @@ while true; do
     echo ""
 
     # Progress: count completed questions and conversations
-    QUESTIONS=$(grep -c "BEAM score:" "$LOG" 2>/dev/null | tail -1 || echo "0")
-    CONVS_DONE=$(grep -c "BEAM 100K — Conv" "$LOG" 2>/dev/null | tail -1 || echo "0")
+    QUESTIONS=$(grep -c "BEAM score:" "$LOG" 2>/dev/null || true)
+    QUESTIONS=${QUESTIONS:-0}
+    QUESTIONS=$(echo "$QUESTIONS" | tr -d '[:space:]')
+    CONVS_DONE=$(grep -c "BEAM 100K" "$LOG" 2>/dev/null || true)
+    CONVS_DONE=${CONVS_DONE:-0}
+    CONVS_DONE=$(echo "$CONVS_DONE" | tr -d '[:space:]')
     echo "Progress: $QUESTIONS/400 questions scored ($CONVS_DONE convs started)"
     echo ""
 
