@@ -237,17 +237,17 @@ impl ReadEngine {
     /// Falls back to empty classifier (keyword matching) on timeout or error.
     async fn get_classifier(&self) -> &QueryClassifier {
         self.classifier.get_or_init(|| async {
-            info!("Initializing embedding-based query classifier (timeout: 60s)...");
+            eprintln!("[CLASSIFIER] Starting init (timeout: 60s)...");
             match tokio::time::timeout(
                 std::time::Duration::from_secs(60),
                 QueryClassifier::new(self.llm.as_ref()),
             ).await {
                 Ok(c) => {
-                    info!(centroids = c.centroids.len(), "Classifier initialized");
+                    eprintln!("[CLASSIFIER] Initialized with {} centroids", c.centroids.len());
                     c
                 }
                 Err(_) => {
-                    tracing::warn!("Classifier init timed out, falling back to keyword matching");
+                    eprintln!("[CLASSIFIER] TIMEOUT — falling back to keyword matching");
                     QueryClassifier { centroids: Vec::new() }
                 }
             }
