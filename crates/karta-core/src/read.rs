@@ -237,17 +237,7 @@ impl ReadEngine {
     async fn get_classifier(&self) -> &QueryClassifier {
         self.classifier.get_or_init(|| async {
             info!("Initializing embedding-based query classifier...");
-            // Timeout: if Azure is slow/overloaded, fall back to empty classifier (keyword fallback)
-            match tokio::time::timeout(
-                std::time::Duration::from_secs(30),
-                QueryClassifier::new(self.llm.as_ref()),
-            ).await {
-                Ok(c) => c,
-                Err(_) => {
-                    tracing::warn!("Classifier init timed out after 30s, using keyword fallback");
-                    QueryClassifier { centroids: Vec::new() }
-                }
-            }
+            QueryClassifier::new(self.llm.as_ref()).await
         }).await
     }
 
@@ -554,47 +544,8 @@ impl ReadEngine {
     }
 
     /// Search + deduplicate + synthesize an answer with provenance markers.
-    /// Includes abstention calibration and insufficient-info retry.
+    /// Includes abstention calibration: if no notes are sufficiently relevant, abstains.
     pub async fn ask(&self, query: &str, top_k: usize) -> Result<AskResult> {
-        let result = self.ask_inner(query, top_k, false).await?;
-
-        // Retry if the answer admits missing information, but ONLY for query modes
-        // where missing specific facts is the failure mode (Computation, Temporal).
-        // Don't retry Standard/Breadth/Existence — abstention is more likely correct there.
-        let mode = classify_query_keywords(query);
-        let retry_eligible = matches!(mode, QueryMode::Computation | QueryMode::Temporal);
-
-        if retry_eligible && Self::answer_admits_insufficient_info(&result.answer) && result.notes_used > 0 {
-            debug!(query_mode = ?mode, "Answer admits insufficient info, retrying with wider retrieval");
-            let retry = self.ask_inner(query, top_k * 3, true).await?;
-            // Keep the retry only if it produced a more confident answer
-            if !Self::answer_admits_insufficient_info(&retry.answer) {
-                debug!("Retry produced a confident answer, using it");
-                return Ok(retry);
-            }
-            debug!("Retry also insufficient, keeping original");
-        }
-
-        Ok(result)
-    }
-
-    /// Check if an answer contains language indicating the LLM couldn't find enough information.
-    fn answer_admits_insufficient_info(answer: &str) -> bool {
-        let lower = answer.to_lowercase();
-        lower.contains("don't have information")
-            || lower.contains("notes do not")
-            || lower.contains("notes don't")
-            || lower.contains("can't find")
-            || lower.contains("can't determine")
-            || lower.contains("cannot determine")
-            || lower.contains("not explicitly stated")
-            || lower.contains("not mentioned in")
-            || lower.contains("not in the notes")
-            || lower.contains("not provided in")
-            || lower.contains("i don't see any note")
-    }
-
-    async fn ask_inner(&self, query: &str, top_k: usize, is_retry: bool) -> Result<AskResult> {
         // Adaptive top-K based on query mode (keyword fallback; search() uses embedding classifier)
         let mode = classify_query_keywords(query);
         let effective_top_k = match mode {
@@ -622,7 +573,7 @@ impl ReadEngine {
         }
 
         // --- Reranker: abstention gate + reorder results by cross-encoder relevance ---
-        if self.reranker_config.enabled && !is_retry {
+        if self.reranker_config.enabled {
             let notes_for_rerank: Vec<(MemoryNote, f32)> = results
                 .iter()
                 .take(self.reranker_config.max_rerank)
