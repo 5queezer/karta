@@ -464,34 +464,36 @@ impl ReadEngine {
                 });
             }
 
-            // Rebuild results ordered by reranker relevance_score (descending).
-            // Reranked notes replace their original SearchResult entries.
-            // Non-reranked results (beyond max_rerank) keep original order at the end.
-            let reranked_ids: HashSet<String> = reranked.iter().map(|r| r.note.id.clone()).collect();
-            let mut reordered: Vec<SearchResult> = Vec::new();
+            // Reorder results by cross-encoder relevance, EXCEPT for Computation mode.
+            // Computation needs factual completeness (both date notes), not topical precision.
+            // Reranker pushes date-bearing notes down because they score low on topical relevance.
+            if mode != QueryMode::Computation {
+                let reranked_ids: HashSet<String> = reranked.iter().map(|r| r.note.id.clone()).collect();
+                let mut reordered: Vec<SearchResult> = Vec::new();
 
-            // First: reranked notes in cross-encoder order, with their linked_notes preserved
-            for rr in &reranked {
-                let linked = results.iter()
-                    .find(|r| r.note.id == rr.note.id)
-                    .map(|r| r.linked_notes.clone())
-                    .unwrap_or_default();
-                reordered.push(SearchResult {
-                    note: rr.note.clone(),
-                    score: rr.relevance_score,
-                    linked_notes: linked,
-                });
-            }
-
-            // Then: any results that weren't sent to reranker (original order)
-            for r in &results {
-                if !reranked_ids.contains(&r.note.id) {
-                    reordered.push(r.clone());
+                for rr in &reranked {
+                    let linked = results.iter()
+                        .find(|r| r.note.id == rr.note.id)
+                        .map(|r| r.linked_notes.clone())
+                        .unwrap_or_default();
+                    reordered.push(SearchResult {
+                        note: rr.note.clone(),
+                        score: rr.relevance_score,
+                        linked_notes: linked,
+                    });
                 }
-            }
 
-            results = reordered;
-            debug!(reranked_count = reranked.len(), "Reranker: reordered results by relevance");
+                for r in &results {
+                    if !reranked_ids.contains(&r.note.id) {
+                        reordered.push(r.clone());
+                    }
+                }
+
+                results = reordered;
+                debug!(reranked_count = reranked.len(), "Reranker: reordered results by relevance");
+            } else {
+                debug!("Reranker: skipping reorder for Computation mode (preserving ANN order)");
+            }
         }
 
         // Deduplicate: collect all unique notes (direct + linked)

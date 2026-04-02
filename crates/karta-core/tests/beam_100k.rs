@@ -214,15 +214,7 @@ fn env_usize(key: &str, default: usize) -> usize {
     std::env::var(key).ok().and_then(|s| s.parse().ok()).unwrap_or(default)
 }
 
-async fn create_karta(conv_id: &str) -> Karta {
-    let suffix = uuid::Uuid::new_v4().to_string()[..8].to_string();
-    let data_dir = format!("/tmp/karta-beam100k-{}-{}", conv_id, suffix);
-    let _ = std::fs::remove_dir_all(&data_dir);
-
-    let mut config = KartaConfig::default();
-    config.storage.data_dir = data_dir;
-
-    // All knobs configurable via env vars for experiment sweeps
+fn apply_config_env(config: &mut KartaConfig) {
     config.episode.enabled = env_bool("K_EPISODE", true);
     config.read.episode_retrieval_enabled = env_bool("K_EPISODE_RETRIEVAL", true);
     config.read.graph_weight = env_f32("K_GRAPH_WEIGHT", 0.0);
@@ -234,7 +226,7 @@ async fn create_karta(conv_id: &str) -> Karta {
     config.read.summarization_top_k_multiplier = env_usize("K_SUMM_TOPK_MULT", 3);
     config.reranker.enabled = env_bool("K_RERANKER", true);
     config.reranker.abstention_threshold = env_f32("K_ABSTENTION_THRESH", 0.01);
-    config.reranker.max_rerank = env_usize("K_MAX_RERANK", 10);
+    config.reranker.max_rerank = env_usize("K_MAX_RERANK", 20);
     config.write.foresight_default_ttl_days = env_usize("K_FORESIGHT_TTL", 90) as i64;
 
     let exp = std::env::var("K_EXPERIMENT").unwrap_or_else(|_| "default".to_string());
@@ -242,6 +234,51 @@ async fn create_karta(conv_id: &str) -> Karta {
         exp, config.episode.enabled, config.read.episode_retrieval_enabled,
         config.read.graph_weight, config.read.foresight_boost,
         config.reranker.enabled, config.reranker.abstention_threshold);
+}
+
+/// Find the most recent data directory for a conversation ID.
+fn find_latest_data_dir(conv_id: &str) -> Option<String> {
+    let pattern = format!("/tmp/karta-beam100k-{}-", conv_id);
+    let mut dirs: Vec<_> = std::fs::read_dir("/tmp")
+        .ok()?
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.file_name().to_string_lossy().starts_with(&format!("karta-beam100k-{}-", conv_id))
+                && e.path().is_dir()
+        })
+        .filter_map(|e| {
+            let modified = e.metadata().ok()?.modified().ok()?;
+            Some((e.path().to_string_lossy().to_string(), modified))
+        })
+        .collect();
+    dirs.sort_by(|a, b| b.1.cmp(&a.1)); // most recent first
+    dirs.into_iter().next().map(|(path, _)| path)
+}
+
+async fn create_karta(conv_id: &str) -> Karta {
+    // If BEAM_SKIP_INGEST is set, reuse the most recent data dir
+    if env_bool("BEAM_SKIP_INGEST", false) {
+        if let Some(existing_dir) = find_latest_data_dir(conv_id) {
+            println!("  Reusing data dir: {}", existing_dir);
+            let mut config = KartaConfig::default();
+            config.storage.data_dir = existing_dir;
+            apply_config_env(&mut config);
+            return Karta::with_defaults(config)
+                .await
+                .expect("Failed to open existing Karta data dir");
+        } else {
+            panic!("BEAM_SKIP_INGEST=true but no data dir found for conv {}", conv_id);
+        }
+    }
+
+    let suffix = uuid::Uuid::new_v4().to_string()[..8].to_string();
+    let data_dir = format!("/tmp/karta-beam100k-{}-{}", conv_id, suffix);
+    let _ = std::fs::remove_dir_all(&data_dir);
+
+    let mut config = KartaConfig::default();
+    config.storage.data_dir = data_dir;
+
+    apply_config_env(&mut config);
 
     Karta::with_defaults(config)
         .await
@@ -286,77 +323,83 @@ async fn eval_conversation(
     println!("{}", "=".repeat(70));
 
     let karta = create_karta(&conv.id).await;
+    let skip_ingest = env_bool("BEAM_SKIP_INGEST", false);
 
-    // --- Ingest phase (session-aware for episode creation) ---
-    let ingest_start = Instant::now();
-    let mut ingested = 0;
-    let mut ingest_errors = 0;
-    let mut current_session = 0usize;
-    let mut last_anchor = String::new();
+    if skip_ingest {
+        let note_count = karta.note_count().await.unwrap_or(0);
+        println!("  Skip ingest: reusing {} existing notes", note_count);
+    } else {
+        // --- Ingest phase (session-aware for episode creation) ---
+        let ingest_start = Instant::now();
+        let mut ingested = 0;
+        let mut ingest_errors = 0;
+        let mut current_session = 0usize;
+        let mut last_anchor = String::new();
 
-    for (i, msg) in conv.user_messages.iter().enumerate() {
-        if msg.content.trim().is_empty() {
-            continue;
-        }
+        for (i, msg) in conv.user_messages.iter().enumerate() {
+            if msg.content.trim().is_empty() {
+                continue;
+            }
 
-        // Derive session boundaries from time_anchor changes
-        if !msg.time_anchor.is_empty() && msg.time_anchor != last_anchor {
-            current_session += 1;
-            last_anchor = msg.time_anchor.clone();
-        }
-        let session_id = format!("session-{}", current_session);
+            // Derive session boundaries from time_anchor changes
+            if !msg.time_anchor.is_empty() && msg.time_anchor != last_anchor {
+                current_session += 1;
+                last_anchor = msg.time_anchor.clone();
+            }
+            let session_id = format!("session-{}", current_session);
 
-        // Parse time_anchor into structured timestamp instead of text prefix
-        let source_timestamp = if msg.time_anchor.is_empty() {
-            None
-        } else {
-            parse_time_anchor(&msg.time_anchor)
-        };
+            // Parse time_anchor into structured timestamp instead of text prefix
+            let source_timestamp = if msg.time_anchor.is_empty() {
+                None
+            } else {
+                parse_time_anchor(&msg.time_anchor)
+            };
 
-        // Still include time_anchor as text prefix for LLM context
-        let content = if msg.time_anchor.is_empty() {
-            msg.content.clone()
-        } else {
-            format!("[{}] {}", msg.time_anchor, msg.content)
-        };
+            // Still include time_anchor as text prefix for LLM context
+            let content = if msg.time_anchor.is_empty() {
+                msg.content.clone()
+            } else {
+                format!("[{}] {}", msg.time_anchor, msg.content)
+            };
 
-        match karta.add_note_with_metadata(&content, &session_id, Some(i as u32), source_timestamp).await {
-            Ok(note) => {
-                ingested += 1;
-                if (i + 1) % 20 == 0 || i == 0 {
-                    println!("  Ingested {}/{} notes ({} links)", i + 1, conv.user_messages.len(), note.links.len());
+            match karta.add_note_with_metadata(&content, &session_id, Some(i as u32), source_timestamp).await {
+                Ok(note) => {
+                    ingested += 1;
+                    if (i + 1) % 20 == 0 || i == 0 {
+                        println!("  Ingested {}/{} notes ({} links)", i + 1, conv.user_messages.len(), note.links.len());
+                    }
+                }
+                Err(e) => {
+                    ingest_errors += 1;
+                    if ingest_errors <= 3 {
+                        eprintln!("  WARN: Note {} failed: {}", i + 1, e);
+                    }
                 }
             }
-            Err(e) => {
-                ingest_errors += 1;
-                if ingest_errors <= 3 {
-                    eprintln!("  WARN: Note {} failed: {}", i + 1, e);
-                }
+        }
+
+        let ingest_ms = ingest_start.elapsed().as_millis();
+        println!(
+            "  Ingested {} notes in {:.1}s ({:.1}s/note, {} errors)",
+            ingested,
+            ingest_ms as f64 / 1000.0,
+            ingest_ms as f64 / 1000.0 / ingested.max(1) as f64,
+            ingest_errors
+        );
+
+        // --- Optional: run dreaming ---
+        let dream_start = Instant::now();
+        match karta.run_dreaming("beam100k", &conv.id).await {
+            Ok(run) => {
+                println!(
+                    "  Dreaming: {} attempted, {} written ({:.1}s)",
+                    run.dreams_attempted,
+                    run.dreams_written,
+                    dream_start.elapsed().as_millis() as f64 / 1000.0
+                );
             }
+            Err(e) => eprintln!("  Dreaming failed: {}", e),
         }
-    }
-
-    let ingest_ms = ingest_start.elapsed().as_millis();
-    println!(
-        "  Ingested {} notes in {:.1}s ({:.1}s/note, {} errors)",
-        ingested,
-        ingest_ms as f64 / 1000.0,
-        ingest_ms as f64 / 1000.0 / ingested.max(1) as f64,
-        ingest_errors
-    );
-
-    // --- Optional: run dreaming ---
-    let dream_start = Instant::now();
-    match karta.run_dreaming("beam100k", &conv.id).await {
-        Ok(run) => {
-            println!(
-                "  Dreaming: {} attempted, {} written ({:.1}s)",
-                run.dreams_attempted,
-                run.dreams_written,
-                dream_start.elapsed().as_millis() as f64 / 1000.0
-            );
-        }
-        Err(e) => eprintln!("  Dreaming failed: {}", e),
     }
 
     // --- Query phase ---
