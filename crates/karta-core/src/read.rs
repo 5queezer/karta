@@ -458,6 +458,16 @@ impl ReadEngine {
             if !note.is_active() || profile_note_ids.contains(&note.id) {
                 continue;
             }
+
+            // Filter out dream/digest notes from direct ANN results.
+            // They dilute top-K slots meant for original user notes.
+            // Dreams are surfaced via contradiction force-retrieval.
+            // Digests are surfaced via episode drilldown + episode link traversal.
+            match &note.provenance {
+                Provenance::Dream { .. } | Provenance::Digest { .. } | Provenance::Fact { .. } => continue,
+                _ => {}
+            }
+
             let mut final_score = self.blended_score_with_weight(sim, &note, effective_recency_weight);
 
             // Graph-aware scoring: notes with more links score higher (PageRank-lite)
