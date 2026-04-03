@@ -87,9 +87,12 @@ impl Prompts {
          4. PROVENANCE: Each note is tagged with provenance and age:\n\
          - FACT = directly observed information\n\
          - INFERRED:{type} = derived by reasoning (deduction, induction, abduction, etc.)\n\
+         - FACT:from-{id} = atomic fact extracted from a note; highly precise for specific values\n\
+         - DIGEST:{id} = episode summary with pre-computed counts and entity tracking; treat aggregation counts as authoritative\n\
          Treat FACT notes as authoritative. Treat INFERRED notes as supporting evidence \
          but flag them as inferences when they are central to your answer. \
-         When FACT and INFERRED notes conflict, prioritize the FACT.\n\n\
+         When FACT and INFERRED notes conflict, prioritize the FACT. \
+         DIGEST notes contain pre-computed aggregations — use their counts rather than re-counting from individual notes.\n\n\
          5. RECENCY: More recent notes generally supersede older ones on the same topic. \
          When answering about current state, prefer the most recent note.\n\n\
          6. FORMAT: Match the format the user expects. \

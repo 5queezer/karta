@@ -394,10 +394,14 @@ impl ReadEngine {
             QueryMode::Recency => 0.60,
             _ => self.config.recency_weight,
         };
-        let direct = self
-            .vector_store
-            .find_similar(&query_embedding, fetch_k, &[])
-            .await?;
+        // Parallel search: notes + atomic facts
+        let fact_k = fetch_k / 2;
+        let (direct_result, fact_hits_result) = tokio::join!(
+            self.vector_store.find_similar(&query_embedding, fetch_k, &[]),
+            self.vector_store.find_similar_facts(&query_embedding, fact_k, &[])
+        );
+        let direct = direct_result?;
+        let fact_hits = fact_hits_result.unwrap_or_default();
 
         // Collect active foresight source note IDs for boosting
         let active_foresight_note_ids: std::collections::HashSet<String> = self
@@ -533,9 +537,72 @@ impl ReadEngine {
             });
         }
 
-        // Merge: profiles first, then episode-drilled (chronological), then flat hits (by score)
+        // --- Fact-to-note expansion ---
+        // High-scoring facts: fetch parent notes and boost them into results
+        let mut fact_expanded: Vec<SearchResult> = Vec::new();
+        let mut seen_note_ids: HashSet<String> = HashSet::new();
+
+        // Collect already-included note IDs
+        for r in &profile_results { seen_note_ids.insert(r.note.id.clone()); }
+        for r in &episode_results { seen_note_ids.insert(r.note.id.clone()); }
+        for r in &flat_results { seen_note_ids.insert(r.note.id.clone()); }
+        for id in &episode_note_ids { seen_note_ids.insert(id.clone()); }
+
+        let fact_boost = 0.1f32;
+        for (fact, score) in &fact_hits {
+            if *score < 0.3 { continue; }
+            if seen_note_ids.contains(&fact.source_note_id) { continue; }
+            if seen_note_ids.insert(fact.source_note_id.clone()) {
+                if let Ok(Some(parent)) = self.vector_store.get(&fact.source_note_id).await {
+                    if parent.is_active() {
+                        fact_expanded.push(SearchResult {
+                            note: parent,
+                            score: score + fact_boost,
+                            linked_notes: Vec::new(),
+                        });
+                    }
+                }
+            }
+        }
+
+        if !fact_expanded.is_empty() {
+            debug!(count = fact_expanded.len(), "Fact-expanded parent notes");
+        }
+
+        // --- Episode link traversal ---
+        // For episode-drilled results, follow episode links to find related episodes
+        let mut linked_digest_results: Vec<SearchResult> = Vec::new();
+        for (episode_id, _) in &episode_hits {
+            if let Ok(links) = self.graph_store.get_episode_links(episode_id).await {
+                for (linked_ep_id, _link_type, _entity) in &links {
+                    if let Ok(Some(digest)) = self.graph_store.get_episode_digest(linked_ep_id).await {
+                        if let Some(ref note_id) = digest.digest_note_id {
+                            if seen_note_ids.insert(note_id.clone()) {
+                                if let Ok(Some(digest_note)) = self.vector_store.get(note_id).await {
+                                    if digest_note.is_active() {
+                                        linked_digest_results.push(SearchResult {
+                                            note: digest_note,
+                                            score: 0.5, // Moderate score for linked digests
+                                            linked_notes: Vec::new(),
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if !linked_digest_results.is_empty() {
+            debug!(count = linked_digest_results.len(), "Episode-linked digest notes");
+        }
+
+        // Merge: profiles → linked digests → episode-drilled → fact-expanded → flat hits
         let mut results = profile_results;
+        results.extend(linked_digest_results);
         results.extend(episode_results);
+        results.extend(fact_expanded);
         results.extend(flat_results);
         results.truncate(top_k);
 
