@@ -370,14 +370,24 @@ impl ReadEngine {
 
     /// Public search: returns exactly top_k results. For external callers.
     pub async fn search(&self, query: &str, top_k: usize) -> Result<Vec<SearchResult>> {
-        let mut results = self.search_wide(query, top_k).await?;
+        let (mut results, _mode) = self.search_wide(query, top_k).await?;
         results.truncate(top_k);
+
+        // Access tracking only for notes actually returned to the caller
+        for result in &results {
+            if let Ok(Some(mut original)) = self.vector_store.get(&result.note.id).await {
+                original.last_accessed_at = Utc::now();
+                let _ = self.vector_store.upsert(&original).await;
+            }
+        }
+
         Ok(results)
     }
 
-    /// Internal search: returns the full expanded candidate pool (not truncated).
-    /// Used by ask() so the reranker can see the full pool before truncation.
-    async fn search_wide(&self, query: &str, top_k: usize) -> Result<Vec<SearchResult>> {
+    /// Internal search: returns the full expanded candidate pool (not truncated)
+    /// plus the classified query mode. Used by ask() so the reranker can see the
+    /// full pool before truncation, and ask() can use the same mode for top_k sizing.
+    async fn search_wide(&self, query: &str, top_k: usize) -> Result<(Vec<SearchResult>, QueryMode)> {
         info!("Searching: \"{}\"", query);
 
         let embeddings = self.llm.embed(&[query]).await?;
@@ -710,22 +720,14 @@ impl ReadEngine {
         // Merge: profiles -> structurally matched digests -> linked digests -> episode-drilled -> fact-expanded -> flat hits
         // Do NOT truncate here. Return the full expanded pool so that ask() can
         // rerank the entire candidate set before truncating to final top_k.
+        // Access tracking is done by the caller (search() or ask()) after truncation,
+        // so only notes actually returned to the user get their access time bumped.
         let mut results = profile_results;
         results.extend(digest_matched_results);
         results.extend(linked_digest_results);
         results.extend(episode_results);
         results.extend(fact_expanded);
         results.extend(flat_results);
-
-        // Update last_accessed_at for all returned notes (access tracking for forgetting).
-        // Fetch the original note by ID to avoid persisting any in-memory mutations
-        // (e.g., fact annotation prefixes) back to storage.
-        for result in &results {
-            if let Ok(Some(mut original)) = self.vector_store.get(&result.note.id).await {
-                original.last_accessed_at = Utc::now();
-                let _ = self.vector_store.upsert(&original).await;
-            }
-        }
 
         info!(
             results = results.len(),
@@ -734,16 +736,19 @@ impl ReadEngine {
             "Search complete"
         );
 
-        Ok(results)
+        Ok((results, mode))
     }
 
     /// Search + deduplicate + synthesize an answer with provenance markers.
     /// Includes abstention calibration: if no notes are sufficiently relevant, abstains.
     pub async fn ask(&self, query: &str, top_k: usize) -> Result<AskResult> {
-        // Keyword classification for top_k sizing. The embedding classifier runs
-        // inside search_wide() for retrieval mode selection. We use keywords here
-        // to avoid a duplicate embedding call (paid API, doubles latency).
-        let mode = classify_query_keywords(query);
+        // Fetch a wide pool from search_wide(), which classifies the query using
+        // the embedding classifier. We pass a generous top_k so the pool is large
+        // enough for any mode, then truncate based on the actual classified mode.
+        let wide_k = top_k * self.config.summarization_top_k_multiplier.max(4);
+        let mut reranker_best: Option<f32> = None;
+
+        let (mut results, mode) = self.search_wide(query, wide_k).await?;
 
         let effective_top_k = match mode {
             QueryMode::Breadth => top_k * self.config.summarization_top_k_multiplier,
@@ -751,11 +756,7 @@ impl ReadEngine {
             QueryMode::Computation => top_k * 2,
             _ => top_k,
         };
-
         let mode_str = format!("{:?}", mode);
-        let mut reranker_best: Option<f32> = None;
-
-        let mut results = self.search_wide(query, effective_top_k).await?;
 
         if results.is_empty() {
             return Ok(AskResult {
@@ -831,6 +832,14 @@ impl ReadEngine {
 
         // Now truncate to final top_k after reranking has reordered the full pool
         results.truncate(effective_top_k);
+
+        // Access tracking: only bump notes that will actually reach synthesis
+        for result in &results {
+            if let Ok(Some(mut original)) = self.vector_store.get(&result.note.id).await {
+                original.last_accessed_at = Utc::now();
+                let _ = self.vector_store.upsert(&original).await;
+            }
+        }
 
         // Deduplicate: collect all unique notes (direct + linked)
         let mut seen = HashSet::new();
