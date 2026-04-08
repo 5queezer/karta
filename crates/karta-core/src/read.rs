@@ -256,9 +256,12 @@ impl ReadEngine {
 
     /// Compute a recency score for a note using exponential decay.
     /// Returns 1.0 for brand new notes, decaying toward 0.0 for old notes.
+    /// Uses source_timestamp (real conversation date) when available,
+    /// falling back to updated_at (ingestion time).
     fn recency_score(&self, note: &MemoryNote) -> f32 {
+        let reference_time = note.source_timestamp.unwrap_or(note.updated_at);
         let age_days = Utc::now()
-            .signed_duration_since(note.updated_at)
+            .signed_duration_since(reference_time)
             .num_seconds() as f64
             / 86400.0;
 
@@ -566,8 +569,14 @@ impl ReadEngine {
         for (fact, score) in &fact_hits {
             if *score < 0.3 { continue; }
             if seen_note_ids.insert(fact.source_note_id.clone()) {
-                if let Ok(Some(parent)) = self.vector_store.get(&fact.source_note_id).await {
+                if let Ok(Some(mut parent)) = self.vector_store.get(&fact.source_note_id).await {
                     if parent.is_active() {
+                        // Prepend the matched atomic fact so the synthesis LLM sees
+                        // the exact value/date/name that matched, not just the full note.
+                        parent.content = format!(
+                            "[Matched fact: {}]\n\n{}",
+                            fact.content, parent.content
+                        );
                         fact_expanded.push(SearchResult {
                             note: parent,
                             score: score + fact_boost,
@@ -688,14 +697,15 @@ impl ReadEngine {
             }
         }
 
-        // Merge: profiles → structurally matched digests → linked digests → episode-drilled → fact-expanded → flat hits
+        // Merge: profiles -> structurally matched digests -> linked digests -> episode-drilled -> fact-expanded -> flat hits
+        // Do NOT truncate here. Return the full expanded pool so that ask() can
+        // rerank the entire candidate set before truncating to final top_k.
         let mut results = profile_results;
         results.extend(digest_matched_results);
         results.extend(linked_digest_results);
         results.extend(episode_results);
         results.extend(fact_expanded);
         results.extend(flat_results);
-        results.truncate(top_k);
 
         // Update last_accessed_at for all returned notes (access tracking for forgetting)
         for result in &results {
@@ -717,8 +727,17 @@ impl ReadEngine {
     /// Search + deduplicate + synthesize an answer with provenance markers.
     /// Includes abstention calibration: if no notes are sufficiently relevant, abstains.
     pub async fn ask(&self, query: &str, top_k: usize) -> Result<AskResult> {
-        // Adaptive top-K based on query mode (keyword fallback; search() uses embedding classifier)
-        let mode = classify_query_keywords(query);
+        // Use the same classifier as search() for consistent mode across both stages.
+        // Embedding classifier when centroids are available, keyword fallback otherwise.
+        let embeddings = self.llm.embed(&[query]).await?;
+        let query_embedding = embeddings.into_iter().next().unwrap_or_default();
+        let classifier = self.get_classifier().await;
+        let mode = if classifier.centroids.is_empty() {
+            classify_query_keywords(query)
+        } else {
+            classifier.classify(&query_embedding)
+        };
+
         let effective_top_k = match mode {
             QueryMode::Breadth => top_k * self.config.summarization_top_k_multiplier,
             QueryMode::Temporal => top_k * 4,
@@ -759,21 +778,16 @@ impl ReadEngine {
 
             reranker_best = Some(best_relevance);
 
+            // Log low-relevance signal but do NOT abstain here.
+            // Let the synthesis model decide whether to answer or abstain based on
+            // the actual note content. Hard-gating on reranker score causes false
+            // abstention on queries where notes are relevant but use different vocabulary.
             if best_relevance < self.reranker_config.abstention_threshold {
                 debug!(
                     best_relevance = best_relevance,
                     threshold = self.reranker_config.abstention_threshold,
-                    "Reranker: abstaining — notes not relevant to query"
+                    "Reranker: low relevance signal (proceeding to synthesis)"
                 );
-                return Ok(AskResult {
-                    answer: "Based on the available memories, I don't have information about this topic.".to_string(),
-                    query_mode: mode_str,
-                    notes_used: 0,
-                    note_ids: Vec::new(),
-                    contradiction_injected: 0,
-                    has_contradiction: false,
-                    reranker_best_score: reranker_best,
-                });
             }
 
             // Reorder results by cross-encoder relevance, EXCEPT for Computation mode.
@@ -807,6 +821,9 @@ impl ReadEngine {
                 debug!("Reranker: skipping reorder for Computation mode (preserving ANN order)");
             }
         }
+
+        // Now truncate to final top_k after reranking has reordered the full pool
+        results.truncate(effective_top_k);
 
         // Deduplicate: collect all unique notes (direct + linked)
         let mut seen = HashSet::new();
