@@ -50,23 +50,22 @@ pub struct GetNoteParams {
     pub id: String,
 }
 
-// -- SVG logo as embedded data URI --
-const LOGO_SVG: &str = include_str!("logo.svg");
-
 // -- MCP Service --
 
 #[derive(Clone)]
 pub struct KartaService {
     karta: Arc<Karta>,
+    base_url: String,
     #[allow(dead_code)]
     tool_router: ToolRouter<KartaService>,
 }
 
 #[tool_router]
 impl KartaService {
-    pub fn new(karta: Arc<Karta>) -> Self {
+    pub fn new(karta: Arc<Karta>, base_url: String) -> Self {
         Self {
             karta,
+            base_url,
             tool_router: Self::tool_router(),
         }
     }
@@ -221,11 +220,7 @@ impl KartaService {
 #[tool_handler]
 impl ServerHandler for KartaService {
     fn get_info(&self) -> ServerInfo {
-        // Build data URI for the SVG icon
-        let icon_data_uri = format!(
-            "data:image/svg+xml;base64,{}",
-            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, LOGO_SVG)
-        );
+        let icon_url = format!("{}/icon.svg", self.base_url);
 
         ServerInfo::new(
             ServerCapabilities::builder().enable_tools().build(),
@@ -235,7 +230,7 @@ impl ServerHandler for KartaService {
                 .with_title("Karta Memory Server")
                 .with_description("Agentic memory system that thinks, not just stores. Store, search, and reason over knowledge using LLM-enriched notes and graph-based retrieval.")
                 .with_icons(vec![
-                    Icon::new(icon_data_uri)
+                    Icon::new(icon_url)
                         .with_mime_type("image/svg+xml")
                         .with_sizes(vec!["any".into()]),
                 ]),

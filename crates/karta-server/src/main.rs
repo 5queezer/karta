@@ -63,7 +63,10 @@ async fn main() -> anyhow::Result<()> {
 
     // Initialize karta-core
     let karta = {
-        let karta_config = karta_core::config::KartaConfig::default();
+        let mut karta_config = karta_core::config::KartaConfig::default();
+        if let Ok(lance_uri) = std::env::var("KARTA_LANCE_URI") {
+            karta_config.storage.lance_uri = Some(lance_uri);
+        }
         match Karta::with_defaults(karta_config).await {
             Ok(k) => {
                 tracing::info!("karta-core initialized");
@@ -142,9 +145,10 @@ async fn main() -> anyhow::Result<()> {
                 allowed_host,
             ]);
 
+        let base_url = config.base_url.clone();
         let mcp_service: StreamableHttpService<mcp::KartaService, LocalSessionManager> =
             StreamableHttpService::new(
-                move || Ok(mcp::KartaService::new(karta_ref.clone())),
+                move || Ok(mcp::KartaService::new(karta_ref.clone(), base_url.clone())),
                 LocalSessionManager::default().into(),
                 mcp_config,
             );
