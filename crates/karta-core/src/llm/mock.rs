@@ -334,7 +334,7 @@ impl LlmProvider for MockLlmProvider {
             self.handle_linking(user_msg)
         } else if system_msg.contains("Update the existing memory") {
             self.handle_evolution(user_msg)
-        } else if system_msg.contains("answer questions using only") {
+        } else if system_msg.to_lowercase().contains("answer questions using only") {
             self.handle_synthesis(user_msg)
         } else if full_prompt.contains("updating an entity profile")
             || user_msg.contains("updating an entity profile")
