@@ -1,0 +1,52 @@
+use axum::extract::FromRequestParts;
+use axum::http::request::Parts;
+use sha2::{Digest, Sha256};
+
+use crate::error::ServerError;
+use crate::state::AppState;
+
+/// Authenticated user extracted from Bearer token.
+#[derive(Debug, Clone)]
+pub struct AuthenticatedUser {
+    pub user_id: String,
+    pub scope: Option<String>,
+}
+
+impl FromRequestParts<AppState> for AuthenticatedUser {
+    type Rejection = ServerError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let auth_header = parts
+            .headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .ok_or_else(|| ServerError::Unauthorized("Missing Authorization header".to_string()))?;
+
+        let token = auth_header
+            .strip_prefix("Bearer ")
+            .ok_or_else(|| ServerError::Unauthorized("Invalid Authorization scheme".to_string()))?;
+
+        let token_hash = hash_token(token);
+
+        let (user_id, scope) = state
+            .db
+            .validate_access_token(&token_hash)?
+            .ok_or_else(|| ServerError::Unauthorized("Invalid or expired token".to_string()))?;
+
+        Ok(AuthenticatedUser { user_id, scope })
+    }
+}
+
+/// Hash a token with SHA-256 and return hex string.
+pub fn hash_token(token: &str) -> String {
+    let digest = Sha256::digest(token.as_bytes());
+    let mut hex = String::with_capacity(64);
+    for byte in digest {
+        use std::fmt::Write;
+        write!(hex, "{byte:02x}").unwrap();
+    }
+    hex
+}

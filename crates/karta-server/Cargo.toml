@@ -1,0 +1,32 @@
+[package]
+name = "karta-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "HTTP server with OAuth 2.1 authorization for karta"
+
+[dependencies]
+karta-core = { path = "../karta-core", default-features = false, features = ["sqlite"] }
+axum = { version = "0.8", features = ["macros"] }
+axum-extra = { version = "0.10", features = ["cookie-private"] }
+tokio = { version = "1", features = ["full"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+oauth2 = "5"
+openidconnect = "4"
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.35", features = ["bundled"] }
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rand = "0.9"
+sha2 = "0.10"
+base64 = "0.22"
+thiserror = "2"
+anyhow = "1"
+dotenvy = "0.15"
+url = "2"
+urlencoding = "2"
