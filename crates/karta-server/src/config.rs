@@ -43,9 +43,13 @@ impl ServerConfig {
         let base_url = required_env("KARTA_BASE_URL")?;
         let cookie_secret_b64 = required_env("KARTA_COOKIE_SECRET")?;
         let cookie_secret = base64::Engine::decode(
-            &base64::engine::general_purpose::STANDARD,
+            &base64::engine::general_purpose::URL_SAFE_NO_PAD,
             &cookie_secret_b64,
         )
+        .or_else(|_| base64::Engine::decode(
+            &base64::engine::general_purpose::STANDARD,
+            &cookie_secret_b64,
+        ))
         .map_err(|e| ServerError::Config(format!("Invalid KARTA_COOKIE_SECRET base64: {e}")))?;
         if cookie_secret.len() < 64 {
             return Err(ServerError::Config(
