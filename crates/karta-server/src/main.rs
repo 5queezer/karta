@@ -129,11 +129,24 @@ async fn main() -> anyhow::Result<()> {
 
     // Add MCP service if karta-core is available
     if let Some(karta_ref) = karta {
+        // Extract hostname from base URL for DNS rebinding protection
+        let allowed_host = url::Url::parse(&config.base_url)
+            .ok()
+            .and_then(|u| u.host_str().map(String::from))
+            .unwrap_or_else(|| "localhost".to_string());
+
+        let mcp_config = StreamableHttpServerConfig::default()
+            .with_allowed_hosts([
+                "localhost".to_string(),
+                "127.0.0.1".to_string(),
+                allowed_host,
+            ]);
+
         let mcp_service: StreamableHttpService<mcp::KartaService, LocalSessionManager> =
             StreamableHttpService::new(
                 move || Ok(mcp::KartaService::new(karta_ref.clone())),
                 LocalSessionManager::default().into(),
-                StreamableHttpServerConfig::default(),
+                mcp_config,
             );
 
         // Protected MCP routes (require Bearer token)
