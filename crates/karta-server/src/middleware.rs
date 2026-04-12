@@ -7,6 +7,7 @@ use crate::state::AppState;
 
 /// Authenticated user extracted from Bearer token.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct AuthenticatedUser {
     pub user_id: String,
     pub scope: Option<String>,
@@ -19,11 +20,14 @@ impl FromRequestParts<AppState> for AuthenticatedUser {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        let auth_header = parts
+        let auth_header_value = parts
             .headers
             .get("authorization")
-            .and_then(|v| v.to_str().ok())
             .ok_or_else(|| ServerError::Unauthorized("Missing Authorization header".to_string()))?;
+
+        let auth_header = auth_header_value
+            .to_str()
+            .map_err(|_| ServerError::Unauthorized("Authorization header contains invalid characters".to_string()))?;
 
         let token = auth_header
             .strip_prefix("Bearer ")

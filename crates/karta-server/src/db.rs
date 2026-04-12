@@ -14,6 +14,7 @@ pub struct OAuthClient {
 
 /// User created on first login via an upstream IdP.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct User {
     pub id: String,
     pub provider: String,
@@ -141,7 +142,7 @@ impl AuthDb {
                 code_challenge_method TEXT NOT NULL,
                 scope TEXT,
                 original_state TEXT NOT NULL,
-                idp_csrf TEXT NOT NULL,
+                idp_csrf TEXT NOT NULL UNIQUE,
                 idp_nonce TEXT,
                 idp_pkce_verifier TEXT NOT NULL,
                 provider TEXT NOT NULL,
@@ -272,12 +273,25 @@ impl AuthDb {
         Ok(())
     }
 
-    /// Consume an auth code (one-time use). Returns None if not found, already used, or expired.
+    /// Consume an auth code atomically (one-time use). Returns None if not found, already used, or expired.
     pub fn consume_auth_code(&self, code: &str) -> Result<Option<AuthCode>> {
         let conn = self.lock()?;
+        let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+
+        // Atomically mark the code as used, checking used=0 and expiry in the WHERE clause
+        conn.execute(
+            "UPDATE auth_codes SET used = 1 WHERE code = ?1 AND used = 0 AND expires_at >= ?2",
+            params![code, now],
+        )?;
+
+        if conn.changes() == 0 {
+            return Ok(None);
+        }
+
+        // Read back the consumed row
         let mut stmt = conn.prepare(
             "SELECT code, client_id, user_id, redirect_uri, code_challenge, code_challenge_method, scope, expires_at
-             FROM auth_codes WHERE code = ?1 AND used = 0",
+             FROM auth_codes WHERE code = ?1",
         )?;
         let result: Option<AuthCode> = stmt
             .query(params![code])?
@@ -296,12 +310,6 @@ impl AuthDb {
             })
             .transpose()?;
 
-        if result.is_some() {
-            conn.execute(
-                "UPDATE auth_codes SET used = 1 WHERE code = ?1",
-                params![code],
-            )?;
-        }
         Ok(result)
     }
 
@@ -340,7 +348,7 @@ impl AuthDb {
 
         match result {
             Some((user_id, scope, expires_at)) => {
-                let expires = chrono::NaiveDateTime::parse_from_str(&expires_at, "%Y-%m-%d %H:%M:%S")
+                let expires = chrono::NaiveDateTime::parse_from_str(&expires_at, "%Y-%m-%dT%H:%M:%SZ")
                     .map_err(|e| ServerError::Internal(format!("Bad expiry timestamp: {e}")))?;
                 let expires_utc = expires.and_utc();
                 if expires_utc < chrono::Utc::now() {
@@ -372,42 +380,65 @@ impl AuthDb {
         Ok(())
     }
 
-    /// Consume a refresh token (rotation). Revokes the old one, returns (client_id, user_id, scope).
+    /// Consume a refresh token (rotation). Atomically revokes the old one, returns (client_id, user_id, scope).
+    /// Implements breach detection: if a revoked token is reused, all tokens for that client/user are revoked.
     pub fn consume_refresh_token(
         &self,
         token_hash: &str,
     ) -> Result<Option<(String, String, Option<String>)>> {
         let conn = self.lock()?;
+        let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+
+        // Atomically revoke the token, checking revoked=0 and expiry in the WHERE clause
+        conn.execute(
+            "UPDATE refresh_tokens SET revoked = 1 WHERE token_hash = ?1 AND revoked = 0 AND expires_at >= ?2",
+            params![token_hash, now],
+        )?;
+
+        if conn.changes() == 0 {
+            // Check if token exists but was already revoked (breach detection)
+            let already_revoked: bool = conn.prepare(
+                "SELECT 1 FROM refresh_tokens WHERE token_hash = ?1 AND revoked = 1",
+            )?.exists(params![token_hash])?;
+
+            if already_revoked {
+                // Revoke all tokens for this client+user (token theft detected)
+                let (client_id, user_id): (String, String) = {
+                    let mut s = conn.prepare(
+                        "SELECT client_id, user_id FROM refresh_tokens WHERE token_hash = ?1",
+                    )?;
+                    s.query_row(params![token_hash], |r| Ok((r.get(0)?, r.get(1)?)))?
+                };
+                conn.execute(
+                    "UPDATE refresh_tokens SET revoked = 1 WHERE client_id = ?1 AND user_id = ?2",
+                    params![client_id, user_id],
+                )?;
+                conn.execute(
+                    "DELETE FROM access_tokens WHERE client_id = ?1 AND user_id = ?2",
+                    params![client_id, user_id],
+                )?;
+                tracing::warn!(
+                    client_id = %client_id,
+                    user_id = %user_id,
+                    "Refresh token reuse detected - revoked all tokens for client/user"
+                );
+            }
+            return Ok(None);
+        }
+
+        // Read back the consumed row
         let mut stmt = conn.prepare(
-            "SELECT client_id, user_id, scope, expires_at FROM refresh_tokens
-             WHERE token_hash = ?1 AND revoked = 0",
+            "SELECT client_id, user_id, scope FROM refresh_tokens WHERE token_hash = ?1",
         )?;
         let result = stmt
             .query(params![token_hash])?
             .next()?
-            .map(|row| -> rusqlite::Result<(String, String, Option<String>, String)> {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            .map(|row| -> rusqlite::Result<(String, String, Option<String>)> {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
             })
             .transpose()?;
 
-        match result {
-            Some((client_id, user_id, scope, expires_at)) => {
-                let expires =
-                    chrono::NaiveDateTime::parse_from_str(&expires_at, "%Y-%m-%d %H:%M:%S")
-                        .map_err(|e| ServerError::Internal(format!("Bad expiry timestamp: {e}")))?;
-                let expires_utc = expires.and_utc();
-                if expires_utc < chrono::Utc::now() {
-                    return Ok(None);
-                }
-                // Revoke the old token
-                conn.execute(
-                    "UPDATE refresh_tokens SET revoked = 1 WHERE token_hash = ?1",
-                    params![token_hash],
-                )?;
-                Ok(Some((client_id, user_id, scope)))
-            }
-            None => Ok(None),
-        }
+        Ok(result)
     }
 
     // ── Pending auth requests ────────────────────────────────
@@ -438,6 +469,7 @@ impl AuthDb {
     }
 
     /// Consume a pending auth request by the IdP CSRF token.
+    /// Safety: the Mutex serializes all access within this process, preventing TOCTOU races.
     pub fn consume_pending_auth(&self, idp_csrf: &str) -> Result<Option<PendingAuth>> {
         let conn = self.lock()?;
         let mut stmt = conn.prepare(
@@ -471,6 +503,10 @@ impl AuthDb {
                 "DELETE FROM pending_auth_requests WHERE idp_csrf = ?1",
                 params![idp_csrf],
             )?;
+            if conn.changes() == 0 {
+                // Someone else consumed it between SELECT and DELETE
+                return Ok(None);
+            }
         }
         Ok(result)
     }
@@ -479,7 +515,7 @@ impl AuthDb {
 
     pub fn cleanup_expired(&self) -> Result<u64> {
         let conn = self.lock()?;
-        let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+        let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
         let mut total = 0u64;
         total += conn.execute(
             "DELETE FROM auth_codes WHERE expires_at < ?1 OR used = 1",

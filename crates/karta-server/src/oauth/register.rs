@@ -29,20 +29,40 @@ pub struct RegisterResponse {
 /// `POST /oauth/register` — Dynamic Client Registration (RFC 7591).
 pub async fn register_client(
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
     Json(req): Json<RegisterRequest>,
 ) -> Result<(StatusCode, Json<RegisterResponse>)> {
+    // Check registration token if configured
+    if let Some(expected_token) = &state.config.registration_token {
+        let provided = headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .ok_or_else(|| ServerError::Unauthorized(
+                "Registration requires Authorization: Bearer <token>".to_string(),
+            ))?;
+        if provided != expected_token {
+            return Err(ServerError::Unauthorized("Invalid registration token".to_string()));
+        }
+    }
+
     if req.redirect_uris.is_empty() {
         return Err(ServerError::BadRequest(
             "redirect_uris must not be empty".to_string(),
         ));
     }
 
-    // Validate all redirect URIs are valid URLs
+    // Validate all redirect URIs are valid URLs with appropriate schemes
     for uri in &req.redirect_uris {
-        if url::Url::parse(uri).is_err() {
-            return Err(ServerError::BadRequest(format!(
-                "Invalid redirect_uri: {uri}"
-            )));
+        let parsed = url::Url::parse(uri)
+            .map_err(|_| ServerError::BadRequest(format!("Invalid redirect_uri: {uri}")))?;
+        let is_loopback = parsed
+            .host_str()
+            .is_some_and(|h| h == "localhost" || h == "127.0.0.1");
+        if parsed.scheme() != "https" && !(parsed.scheme() == "http" && is_loopback) {
+            return Err(ServerError::BadRequest(
+                "redirect_uri must use HTTPS (HTTP allowed only for localhost)".to_string(),
+            ));
         }
     }
 

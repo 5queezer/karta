@@ -7,8 +7,9 @@ mod routes;
 mod state;
 
 use axum::Router;
+use axum::http::{Method, HeaderValue, header};
 use axum::routing::{get, post};
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{CorsLayer, AllowOrigin};
 use tower_http::trace::TraceLayer;
 
 use config::ServerConfig;
@@ -32,10 +33,38 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(host = %config.host, port = %config.port, "Starting karta-server");
 
     // Initialize auth database
-    let db = AuthDb::new("karta-auth.db")?;
+    let db = AuthDb::new(&config.db_path)?;
+
+    // Spawn background cleanup task
+    let cleanup_db = db.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(600));
+        loop {
+            interval.tick().await;
+            match cleanup_db.cleanup_expired() {
+                Ok(n) => {
+                    if n > 0 {
+                        tracing::info!(cleaned = n, "Expired token cleanup");
+                    }
+                }
+                Err(e) => tracing::error!("Token cleanup failed: {e}"),
+            }
+        }
+    });
 
     // Build application state
     let state = AppState::new(config.clone(), db).await?;
+
+    // Build CORS layer from configured origins
+    let origins: Vec<HeaderValue> = config
+        .allowed_origins
+        .iter()
+        .filter_map(|o| o.parse::<HeaderValue>().ok())
+        .collect();
+    let cors = CorsLayer::new()
+        .allow_origin(AllowOrigin::list(origins))
+        .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+        .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE, header::ACCEPT]);
 
     let app = Router::new()
         // OAuth discovery
@@ -55,7 +84,7 @@ async fn main() -> anyhow::Result<()> {
         // Protected API routes
         .route("/api/health", get(routes::health))
         .layer(TraceLayer::new_for_http())
-        .layer(CorsLayer::permissive())
+        .layer(cors)
         .with_state(state);
 
     let addr = format!("{}:{}", config.host, config.port);

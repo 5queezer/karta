@@ -19,6 +19,7 @@ pub enum ServerError {
     Unauthorized(String),
 
     #[error("Not found: {0}")]
+    #[allow(dead_code)]
     NotFound(String),
 
     #[error("OAuth error: {error}")]
@@ -62,14 +63,20 @@ impl IntoResponse for ServerError {
                     json!({"error": "server_error", "error_description": "Server misconfiguration"}),
                 )
             }
-            ServerError::BadRequest(msg) => (
-                StatusCode::BAD_REQUEST,
-                json!({"error": "invalid_request", "error_description": msg}),
-            ),
-            ServerError::Unauthorized(msg) => (
-                StatusCode::UNAUTHORIZED,
-                json!({"error": "invalid_token", "error_description": msg}),
-            ),
+            ServerError::BadRequest(msg) => {
+                tracing::warn!("Bad request: {msg}");
+                (
+                    StatusCode::BAD_REQUEST,
+                    json!({"error": "invalid_request", "error_description": msg}),
+                )
+            }
+            ServerError::Unauthorized(msg) => {
+                tracing::warn!("Unauthorized: {msg}");
+                (
+                    StatusCode::UNAUTHORIZED,
+                    json!({"error": "invalid_token", "error_description": msg}),
+                )
+            }
             ServerError::NotFound(msg) => (
                 StatusCode::NOT_FOUND,
                 json!({"error": "not_found", "error_description": msg}),
@@ -78,10 +85,13 @@ impl IntoResponse for ServerError {
                 error,
                 error_description,
                 status,
-            } => (
-                *status,
-                json!({"error": error, "error_description": error_description}),
-            ),
+            } => {
+                tracing::warn!(error = %error, description = %error_description, "OAuth error");
+                (
+                    *status,
+                    json!({"error": error, "error_description": error_description}),
+                )
+            }
             ServerError::IdpError(msg) => {
                 tracing::error!("IdP error: {msg}");
                 (

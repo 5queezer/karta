@@ -47,7 +47,7 @@ pub async fn google_callback(
     }
 
     // Check expiry
-    let expires = chrono::NaiveDateTime::parse_from_str(&pending.expires_at, "%Y-%m-%d %H:%M:%S")
+    let expires = chrono::NaiveDateTime::parse_from_str(&pending.expires_at, "%Y-%m-%dT%H:%M:%SZ")
         .map_err(|e| ServerError::Internal(format!("Bad expiry: {e}")))?;
     if expires.and_utc() < chrono::Utc::now() {
         return Err(ServerError::BadRequest("Authorization request expired".to_string()));
@@ -137,7 +137,7 @@ pub async fn github_callback(
     }
 
     // Check expiry
-    let expires = chrono::NaiveDateTime::parse_from_str(&pending.expires_at, "%Y-%m-%d %H:%M:%S")
+    let expires = chrono::NaiveDateTime::parse_from_str(&pending.expires_at, "%Y-%m-%dT%H:%M:%SZ")
         .map_err(|e| ServerError::Internal(format!("Bad expiry: {e}")))?;
     if expires.and_utc() < chrono::Utc::now() {
         return Err(ServerError::BadRequest("Authorization request expired".to_string()));
@@ -156,16 +156,27 @@ pub async fn github_callback(
 
     let access_token = token_response.access_token().secret().clone();
 
-    // Fetch user info from GitHub API
-    let github_user: GitHubUser = state
+    // Fetch user info from GitHub API with timeout
+    let resp = state
         .http_client
         .get("https://api.github.com/user")
         .header("Authorization", format!("Bearer {access_token}"))
         .header("User-Agent", "karta-server")
         .header("Accept", "application/json")
+        .timeout(std::time::Duration::from_secs(10))
         .send()
         .await
-        .map_err(|e| ServerError::IdpError(format!("GitHub user API failed: {e}")))?
+        .map_err(|e| ServerError::IdpError(format!("GitHub user API failed: {e}")))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(ServerError::IdpError(format!(
+            "GitHub user API returned {status}: {body}"
+        )));
+    }
+
+    let github_user: GitHubUser = resp
         .json()
         .await
         .map_err(|e| ServerError::IdpError(format!("GitHub user API parse failed: {e}")))?;
@@ -205,7 +216,7 @@ fn generate_auth_code(
     let code = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(code_bytes);
 
     let expires_at = (chrono::Utc::now() + chrono::Duration::minutes(10))
-        .format("%Y-%m-%d %H:%M:%S")
+        .format("%Y-%m-%dT%H:%M:%SZ")
         .to_string();
 
     let auth_code = AuthCode {

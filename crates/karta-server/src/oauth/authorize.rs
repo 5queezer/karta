@@ -8,6 +8,8 @@ use crate::db::PendingAuth;
 use crate::error::{Result, ServerError};
 use crate::state::AppState;
 
+const VALID_SCOPES: &[&str] = &["read", "write", "admin"];
+
 #[derive(Debug, Deserialize)]
 pub struct AuthorizeParams {
     pub response_type: Option<String>,
@@ -67,6 +69,19 @@ pub async fn authorize(
         ));
     }
 
+    // Validate scope if provided
+    if let Some(scope) = &params.scope {
+        for s in scope.split_whitespace() {
+            if !VALID_SCOPES.contains(&s) {
+                return Err(ServerError::oauth(
+                    "invalid_scope",
+                    &format!("Unknown scope: {s}"),
+                    StatusCode::BAD_REQUEST,
+                ));
+            }
+        }
+    }
+
     // Validate client exists and redirect_uri matches
     let client = state
         .db
@@ -101,7 +116,7 @@ pub async fn authorize(
 
     let idp_csrf = generate_random_string();
     let expires_at = (chrono::Utc::now() + chrono::Duration::minutes(10))
-        .format("%Y-%m-%d %H:%M:%S")
+        .format("%Y-%m-%dT%H:%M:%SZ")
         .to_string();
 
     // Build upstream IdP authorization URL

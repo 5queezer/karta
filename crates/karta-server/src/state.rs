@@ -28,6 +28,7 @@ pub type GithubClient = BasicClient<
 >;
 
 #[derive(Clone)]
+#[allow(dead_code)]
 pub struct AppState {
     pub db: AuthDb,
     pub google_client: GoogleClient,
