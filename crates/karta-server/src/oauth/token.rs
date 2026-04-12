@@ -191,6 +191,35 @@ async fn handle_refresh_token_grant(
             StatusCode::BAD_REQUEST,
         ))?;
 
+    // Look up the client and verify client_secret if the client has one
+    let client = state
+        .db
+        .get_client(client_id)?
+        .ok_or_else(|| ServerError::oauth(
+            "invalid_client",
+            "Unknown client_id",
+            StatusCode::UNAUTHORIZED,
+        ))?;
+
+    if let Some(expected_hash) = &client.client_secret_hash {
+        let provided_secret = req
+            .client_secret
+            .as_deref()
+            .ok_or_else(|| ServerError::oauth(
+                "invalid_client",
+                "client_secret is required for this client",
+                StatusCode::UNAUTHORIZED,
+            ))?;
+        let provided_hash = hash_token(provided_secret);
+        if provided_hash != *expected_hash {
+            return Err(ServerError::oauth(
+                "invalid_client",
+                "Invalid client_secret",
+                StatusCode::UNAUTHORIZED,
+            ));
+        }
+    }
+
     let token_hash = hash_token(refresh_token);
 
     let (stored_client_id, user_id, scope) = state

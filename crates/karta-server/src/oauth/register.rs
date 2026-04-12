@@ -71,6 +71,12 @@ pub async fn register_client(
         .as_deref()
         .unwrap_or("none");
 
+    if auth_method != "none" && auth_method != "client_secret_post" {
+        return Err(ServerError::BadRequest(
+            format!("Unsupported token_endpoint_auth_method: {auth_method}. Supported: none, client_secret_post")
+        ));
+    }
+
     let client_id = uuid::Uuid::new_v4().to_string();
 
     let (client_secret, client_secret_hash) = if auth_method == "client_secret_post" {

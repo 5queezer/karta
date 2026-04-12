@@ -9,7 +9,7 @@ description = "MCP server with OAuth 2.1 for karta agentic memory"
 karta-core = { path = "../karta-core" }
 
 # MCP SDK
-rmcp = { git = "https://github.com/modelcontextprotocol/rust-sdk", branch = "main", features = [
+rmcp = { git = "https://github.com/modelcontextprotocol/rust-sdk", rev = "a64be231527f923e9f84d4dd7bf3c3bd695ee53e", features = [
     "server",
     "macros",
     "transport-streamable-http-server",

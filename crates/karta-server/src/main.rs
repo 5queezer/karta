@@ -150,13 +150,15 @@ async fn main() -> anyhow::Result<()> {
             );
 
         // Protected MCP routes (require Bearer token)
+        // In axum, last .layer() is outermost (runs first on request).
+        // CORS must be outermost so OPTIONS preflight isn't blocked by auth.
         let protected_mcp = Router::new()
             .nest_service("/mcp", mcp_service)
-            .layer(mcp_cors)
             .layer(axum::middleware::from_fn_with_state(
                 app_state.clone(),
                 middleware::validate_token_middleware,
-            ));
+            ))
+            .layer(mcp_cors);
 
         app = app.merge(protected_mcp);
         tracing::info!("MCP endpoint enabled at /mcp");

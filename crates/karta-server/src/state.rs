@@ -42,6 +42,7 @@ impl AppState {
     pub async fn new(config: ServerConfig, db: AuthDb) -> Result<Self> {
         let http_client = reqwest::ClientBuilder::new()
             .redirect(reqwest::redirect::Policy::none())
+            .timeout(std::time::Duration::from_secs(30))
             .build()
             .map_err(|e| ServerError::Internal(format!("Failed to build HTTP client: {e}")))?;
 

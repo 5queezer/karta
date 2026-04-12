@@ -114,7 +114,8 @@ impl KartaService {
         &self,
         Parameters(params): Parameters<SearchParams>,
     ) -> Result<CallToolResult, McpError> {
-        match self.karta.search(&params.query, params.top_k).await {
+        let top_k = params.top_k.min(100).max(1);
+        match self.karta.search(&params.query, top_k).await {
             Ok(results) => {
                 let response: Vec<serde_json::Value> = results
                     .iter()
@@ -146,7 +147,8 @@ impl KartaService {
         &self,
         Parameters(params): Parameters<AskParams>,
     ) -> Result<CallToolResult, McpError> {
-        match self.karta.ask(&params.query, params.top_k).await {
+        let top_k = params.top_k.min(100).max(1);
+        match self.karta.ask(&params.query, top_k).await {
             Ok(result) => {
                 let response = serde_json::json!({
                     "answer": result.answer,

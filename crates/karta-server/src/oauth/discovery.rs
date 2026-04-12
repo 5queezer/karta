@@ -7,7 +7,7 @@ use crate::state::AppState;
 /// `GET /.well-known/oauth-authorization-server`
 /// Returns OAuth 2.0 Authorization Server Metadata per RFC 8414.
 pub async fn oauth_metadata(State(state): State<AppState>) -> Json<Value> {
-    let base = &state.config.base_url;
+    let base = state.config.base_url.trim_end_matches('/');
     Json(json!({
         "issuer": base,
         "authorization_endpoint": format!("{base}/oauth/authorize"),

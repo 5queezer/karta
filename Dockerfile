@@ -11,4 +11,6 @@ COPY --from=builder /app/target/release/karta-server /usr/local/bin/
 ENV KARTA_HOST=0.0.0.0
 ENV KARTA_PORT=8080
 EXPOSE 8080
+RUN useradd -r -s /bin/false karta
+USER karta
 CMD ["karta-server"]

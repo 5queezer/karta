@@ -256,11 +256,12 @@ impl AuthDb {
 
     pub fn insert_auth_code(&self, code: &AuthCode) -> Result<()> {
         let conn = self.lock()?;
+        let code_hash = crate::middleware::hash_token(&code.code);
         conn.execute(
             "INSERT INTO auth_codes (code, client_id, user_id, redirect_uri, code_challenge, code_challenge_method, scope, expires_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
-                code.code,
+                code_hash,
                 code.client_id,
                 code.user_id,
                 code.redirect_uri,
@@ -277,11 +278,12 @@ impl AuthDb {
     pub fn consume_auth_code(&self, code: &str) -> Result<Option<AuthCode>> {
         let conn = self.lock()?;
         let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+        let code_hash = crate::middleware::hash_token(code);
 
         // Atomically mark the code as used, checking used=0 and expiry in the WHERE clause
         conn.execute(
             "UPDATE auth_codes SET used = 1 WHERE code = ?1 AND used = 0 AND expires_at >= ?2",
-            params![code, now],
+            params![code_hash, now],
         )?;
 
         if conn.changes() == 0 {
@@ -294,7 +296,7 @@ impl AuthDb {
              FROM auth_codes WHERE code = ?1",
         )?;
         let result: Option<AuthCode> = stmt
-            .query(params![code])?
+            .query(params![code_hash])?
             .next()?
             .map(|row| -> rusqlite::Result<AuthCode> {
                 Ok(AuthCode {
