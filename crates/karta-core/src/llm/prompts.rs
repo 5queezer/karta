@@ -80,10 +80,15 @@ impl Prompts {
          Notes marked [CONTRADICTION SOURCE] are both sides of a detected contradiction. \
          Present BOTH sides explicitly with specific quotes and ask which is correct. \
          Do NOT silently choose one side.\n\n\
-         3. TEMPORAL REASONING: Pay close attention to dates and time references in notes. \
-         When computing durations or ordering events, show your work: \
-         state the specific dates, then calculate. \
-         Use note timestamps and date references as the source of truth.\n\n\
+         3. TEMPORAL REASONING: Pay close attention to dates and time references. \
+         If the context begins with an \"EVENTS IN THIS CONVERSATION\" block, \
+         treat its ISO dates as authoritative — they were extracted by a dream-time pass \
+         over the full conversation and are more reliable than dates you may infer from \
+         scattered note text. When computing durations or ordering events, show your work: \
+         state the specific dates from the EVENTS block (or from note content if no block \
+         is present), then calculate. If an EVENTS block is present and the two events you \
+         need are BOTH listed, you MUST compute the answer rather than saying the data is \
+         missing.\n\n\
          4. PROVENANCE: Each note is tagged with provenance and age:\n\
          - FACT = directly observed information\n\
          - INFERRED:{type} = derived by reasoning (deduction, induction, abduction, etc.)\n\
@@ -260,7 +265,27 @@ impl Prompts {
              2. date_range: earliest and latest dates mentioned IN THE CONTENT (not timestamps).\n\
              3. aggregations: countable collections (e.g., '5 movies discussed: [list]').\n\
              4. topic_sequence: topics in the ORDER they appeared.\n\
-             5. digest_text: A 2-4 sentence summary that embeds well for retrieval. \
+             5. timed_events: EVERY specific action, meeting, milestone, deadline, decision, \
+                commitment, plan, or state change mentioned in the notes. BE VERY GENEROUS — \
+                any concrete past/future happening counts, even planned or hypothetical ones. \
+                If the episode has more than zero notes, it should have more than zero events. \
+                Each event has:\n\
+                - description: a concrete action phrased as a short clause \
+                  (e.g. \"finished transaction management features\", \"met with Wyatt expressing skepticism\", \
+                  \"planned deployment for Friday\")\n\
+                - date: ISO YYYY-MM-DD. Determine it in this order:\n\
+                  (a) If the note content contains an explicit date for the event (e.g. \"on March 10\", \
+                      \"April 15 deadline\", \"2024-03-29\"), USE THAT DATE.\n\
+                  (b) Otherwise, if the source note begins with a bracketed date prefix like \
+                      [March-15-2024] or [2024-03-15] (this is the conversation timestamp of that message), \
+                      USE THE NOTE'S PREFIX DATE. This is the most common case — ALMOST EVERY NOTE \
+                      IN THIS DATASET HAS A [DATE] PREFIX, so almost every event should end up with a date.\n\
+                  (c) Only set date to null if neither (a) nor (b) applies.\n\
+                - source_turn: the [N] index of the note the event came from, if known, else null\n\
+                IMPORTANT: downstream code uses this to answer \"how many days between X and Y\" \
+                questions. Prefer MANY dated events over a few vague undated ones. Include the same event \
+                only once even if it is mentioned across several notes.\n\
+             6. digest_text: A 2-4 sentence summary that embeds well for retrieval. \
                 Include specific names, numbers, and dates.\n\n\
              Notes:\n{}\n\n\
              Respond with JSON:\n\
@@ -270,6 +295,8 @@ impl Prompts {
                \"date_range\": {{\"earliest\": \"YYYY-MM-DD\", \"latest\": \"YYYY-MM-DD\"}} or null,\n\
                \"aggregations\": [{{\"label\": \"movies discussed\", \"count\": 5, \"items\": [\"...\"]}}],\n\
                \"topic_sequence\": [\"first topic\", \"second topic\"],\n\
+               \"timed_events\": [{{\"description\": \"finished transaction management features\", \
+                 \"date\": \"2024-03-15\", \"source_turn\": 12}}],\n\
                \"digest_text\": \"retrieval-optimized summary\",\n\
                \"confidence\": 0.8\n\
              }}",
@@ -282,6 +309,7 @@ impl Prompts {
             "You are analyzing digests from multiple episodes to find cross-episode patterns.\n\n\
              For each entity that appears in 2+ episodes, track how its value changed over time.\n\
              Identify aggregations that span episodes (total unique items across all episodes).\n\
+             Merge all timed events into one deduped chronological list across episodes.\n\
              Find the overall topic progression across episodes.\n\n\
              Episode digests:\n{}\n\n\
              Respond with JSON:\n\
@@ -289,6 +317,8 @@ impl Prompts {
                \"entity_timeline\": [{{\"name\": \"...\", \"type\": \"...\", \
                  \"changes\": [{{\"episode_id\": \"...\", \"value\": \"...\"}}]}}],\n\
                \"cross_aggregations\": [{{\"label\": \"...\", \"count\": 0, \"items\": [\"...\"]}}],\n\
+               \"timed_events\": [{{\"description\": \"...\", \"date\": \"YYYY-MM-DD or null\", \
+                 \"source_turn\": null}}],\n\
                \"topic_progression\": [\"...\"],\n\
                \"digest_text\": \"cross-episode summary optimized for retrieval\",\n\
                \"confidence\": 0.7\n\

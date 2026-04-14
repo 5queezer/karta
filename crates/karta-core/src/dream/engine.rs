@@ -717,6 +717,7 @@ impl DreamEngine {
         use crate::llm::Prompts;
         use crate::note::{
             AggregationEntry, DateRange, EntityMention, EpisodeDigest, NoteStatus, Provenance,
+            TimedEvent,
         };
 
         let notes_text: String = notes.iter().enumerate()
@@ -730,7 +731,7 @@ impl DreamEngine {
             content: prompt,
         }];
         let config = crate::llm::GenConfig {
-            max_tokens: 4096,
+            max_tokens: 6144,
             temperature: 0.0,
             json_mode: true,
             json_schema: None,
@@ -778,6 +779,22 @@ impl DreamEngine {
             .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
             .unwrap_or_default();
 
+        let events: Vec<TimedEvent> = parsed["timed_events"].as_array()
+            .map(|a| a.iter().filter_map(|v| {
+                let description = v["description"].as_str()?.trim();
+                if description.is_empty() { return None; }
+                Some(TimedEvent {
+                    description: description.to_string(),
+                    date: v["date"].as_str().and_then(|s| {
+                        let s = s.trim();
+                        if s.is_empty() || s.eq_ignore_ascii_case("null") { None }
+                        else { Some(s.to_string()) }
+                    }),
+                    source_turn: v["source_turn"].as_u64().map(|n| n as u32),
+                })
+            }).collect())
+            .unwrap_or_default();
+
         // Create digest note for ANN searchability
         let mut digest_note_id = None;
         if !digest_text.is_empty() {
@@ -815,6 +832,7 @@ impl DreamEngine {
             date_range,
             aggregations,
             topic_sequence,
+            events,
             digest_text: digest_text.clone(),
             digest_note_id: digest_note_id.clone(),
             created_at: Utc::now(),
@@ -830,6 +848,7 @@ impl DreamEngine {
             episode_id = %episode.id,
             entities = digest.entities.len(),
             aggregations = digest.aggregations.len(),
+            events = digest.events.len(),
             "Episode digest created"
         );
 
@@ -853,6 +872,10 @@ impl DreamEngine {
         digests: &[crate::note::EpisodeDigest],
     ) -> Result<(DreamRecord, u64)> {
         use crate::llm::Prompts;
+        use crate::note::{
+            AggregationEntry, CrossEpisodeDigest, EntityTimelineChange, EntityTimelineEntry,
+            TimedEvent,
+        };
 
         // Build mapping from display labels to real episode UUIDs
         // The LLM may return "Episode 1" or the UUID — we need to resolve both
@@ -862,15 +885,29 @@ impl DreamEngine {
             label_to_uuid.insert(d.episode_id.clone(), d.episode_id.clone()); // UUID maps to itself
         }
 
+        // Pass the per-episode events through so the LLM can dedupe/merge them
+        // instead of re-inferring from digest text alone.
         let digests_text: String = digests.iter().enumerate()
-            .map(|(i, d)| format!(
-                "[Episode {} (id={})] {}\n  Entities: {}\n  Topics: {}",
-                i + 1,
-                d.episode_id,
-                d.digest_text,
-                d.entities.iter().map(|e| format!("{}({})", e.name, e.count)).collect::<Vec<_>>().join(", "),
-                d.topic_sequence.join(" → "),
-            ))
+            .map(|(i, d)| {
+                let events_line = if d.events.is_empty() {
+                    String::new()
+                } else {
+                    let inline: Vec<String> = d.events.iter().take(20).map(|e| {
+                        let date = e.date.as_deref().unwrap_or("?");
+                        format!("{}: {}", date, e.description)
+                    }).collect();
+                    format!("\n  Events: {}", inline.join(" | "))
+                };
+                format!(
+                    "[Episode {} (id={})] {}\n  Entities: {}\n  Topics: {}{}",
+                    i + 1,
+                    d.episode_id,
+                    d.digest_text,
+                    d.entities.iter().map(|e| format!("{}({})", e.name, e.count)).collect::<Vec<_>>().join(", "),
+                    d.topic_sequence.join(" → "),
+                    events_line,
+                )
+            })
             .collect::<Vec<_>>()
             .join("\n\n");
 
@@ -880,7 +917,7 @@ impl DreamEngine {
             content: prompt,
         }];
         let config = crate::llm::GenConfig {
-            max_tokens: 4096,
+            max_tokens: 6144,
             temperature: 0.0,
             json_mode: true,
             json_schema: None,
@@ -893,41 +930,101 @@ impl DreamEngine {
         let confidence = parsed["confidence"].as_f64().unwrap_or(0.6) as f32;
         let digest_text = parsed["digest_text"].as_str().unwrap_or("").to_string();
 
-        // Create episode links from entity timelines
-        // Resolve LLM-returned episode IDs ("Episode 1" or UUID) to real UUIDs
-        if let Some(timelines) = parsed["entity_timeline"].as_array() {
-            for timeline in timelines {
-                let entity_name = timeline["name"].as_str().unwrap_or("");
-                if let Some(changes) = timeline["changes"].as_array() {
-                    // Resolve each episode_id through the label mapping
-                    let episode_ids: Vec<String> = changes.iter()
-                        .filter_map(|c| {
-                            let raw = c["episode_id"].as_str()?;
-                            label_to_uuid.get(raw).cloned()
+        // Parse structured fields for persistent storage
+        let entity_timeline: Vec<EntityTimelineEntry> = parsed["entity_timeline"].as_array()
+            .map(|a| a.iter().filter_map(|v| {
+                let name = v["name"].as_str()?.to_string();
+                let entity_type = v["type"].as_str().unwrap_or("other").to_string();
+                let changes: Vec<EntityTimelineChange> = v["changes"].as_array()
+                    .map(|arr| arr.iter().filter_map(|c| {
+                        let raw = c["episode_id"].as_str()?;
+                        let resolved = label_to_uuid.get(raw).cloned().unwrap_or_else(|| raw.to_string());
+                        Some(EntityTimelineChange {
+                            episode_id: resolved,
+                            value: c["value"].as_str().unwrap_or("").to_string(),
                         })
-                        .collect();
+                    }).collect())
+                    .unwrap_or_default();
+                Some(EntityTimelineEntry { name, entity_type, changes })
+            }).collect())
+            .unwrap_or_default();
 
-                    // Link each pair of episodes for this entity
-                    for window in episode_ids.windows(2) {
-                        if window.len() == 2 {
-                            let has_value_change = changes.iter()
-                                .filter(|c| {
-                                    let resolved = c["episode_id"].as_str()
-                                        .and_then(|r| label_to_uuid.get(r));
-                                    resolved == Some(&window[0]) || resolved == Some(&window[1])
-                                })
-                                .map(|c| c["value"].as_str().unwrap_or(""))
-                                .collect::<std::collections::HashSet<_>>()
-                                .len() > 1;
+        let cross_aggregations: Vec<AggregationEntry> = parsed["cross_aggregations"].as_array()
+            .map(|a| a.iter().filter_map(|v| {
+                Some(AggregationEntry {
+                    label: v["label"].as_str()?.to_string(),
+                    count: v["count"].as_u64().unwrap_or(0) as u32,
+                    items: v["items"].as_array()
+                        .map(|arr| arr.iter().filter_map(|i| i.as_str().map(String::from)).collect())
+                        .unwrap_or_default(),
+                })
+            }).collect())
+            .unwrap_or_default();
 
-                            let link_type = if has_value_change { "value_update" } else { "entity_continuity" };
-                            let reason = format!("{} appears in both episodes", entity_name);
-                            let _ = self.graph_store.add_episode_link(
-                                &window[0], &window[1], link_type, Some(entity_name), &reason
-                            ).await;
-                        }
-                    }
+        let cross_events: Vec<TimedEvent> = parsed["timed_events"].as_array()
+            .map(|a| a.iter().filter_map(|v| {
+                let description = v["description"].as_str()?.trim();
+                if description.is_empty() { return None; }
+                Some(TimedEvent {
+                    description: description.to_string(),
+                    date: v["date"].as_str().and_then(|s| {
+                        let s = s.trim();
+                        if s.is_empty() || s.eq_ignore_ascii_case("null") { None }
+                        else { Some(s.to_string()) }
+                    }),
+                    source_turn: v["source_turn"].as_u64().map(|n| n as u32),
+                })
+            }).collect())
+            .unwrap_or_default();
+
+        let topic_progression: Vec<String> = parsed["topic_progression"].as_array()
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .unwrap_or_default();
+
+        // Create episode links from entity timelines
+        for timeline in &entity_timeline {
+            let episode_ids: Vec<String> = timeline.changes.iter()
+                .map(|c| c.episode_id.clone())
+                .collect();
+
+            for window in episode_ids.windows(2) {
+                if window.len() == 2 {
+                    let has_value_change = timeline.changes.iter()
+                        .filter(|c| c.episode_id == window[0] || c.episode_id == window[1])
+                        .map(|c| c.value.as_str())
+                        .collect::<std::collections::HashSet<_>>()
+                        .len() > 1;
+
+                    let link_type = if has_value_change { "value_update" } else { "entity_continuity" };
+                    let reason = format!("{} appears in both episodes", timeline.name);
+                    let _ = self.graph_store.add_episode_link(
+                        &window[0], &window[1], link_type, Some(&timeline.name), &reason
+                    ).await;
                 }
+            }
+        }
+
+        // Persist structured cross-level digest so query-time retrieval can read it
+        if !digest_text.is_empty() {
+            let cross_digest = CrossEpisodeDigest {
+                id: Uuid::new_v4().to_string(),
+                scope_id: "default".to_string(),
+                entity_timeline,
+                cross_aggregations,
+                events: cross_events.clone(),
+                topic_progression,
+                digest_text: digest_text.clone(),
+                created_at: Utc::now(),
+            };
+            if let Err(e) = self.graph_store.upsert_cross_episode_digest(&cross_digest).await {
+                debug!(error = %e, "Failed to persist cross-episode digest");
+            } else {
+                debug!(
+                    entities = cross_digest.entity_timeline.len(),
+                    aggregations = cross_digest.cross_aggregations.len(),
+                    events = cross_digest.events.len(),
+                    "Cross-episode digest stored"
+                );
             }
         }
 
@@ -939,7 +1036,8 @@ impl DreamEngine {
             id: Uuid::new_v4().to_string(),
             dream_type: DreamType::CrossEpisodeDigest,
             source_note_ids: source_ids,
-            reasoning: format!("Cross-episode digest across {} episodes", digests.len()),
+            reasoning: format!("Cross-episode digest across {} episodes ({} merged events)",
+                digests.len(), cross_events.len()),
             dream_content: digest_text,
             confidence,
             would_write: confidence >= self.config.write_threshold,

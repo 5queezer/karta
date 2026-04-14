@@ -992,7 +992,19 @@ impl ReadEngine {
             note_entries.push(format_note(base_count + i, note, true));
         }
 
-        let notes_text = note_entries.join("\n\n");
+        let joined_notes = note_entries.join("\n\n");
+
+        // For date-arithmetic / ordering queries, prepend a structured EVENTS
+        // block extracted at dream time from per-episode and cross-episode
+        // digests. Dates in the digest are LLM-extracted from note content,
+        // which is much more reliable than expecting the synthesis model to
+        // pick dates out of scattered note excerpts at query time.
+        let events_block = self.build_events_block(mode).await;
+        let notes_text = if events_block.is_empty() {
+            joined_notes
+        } else {
+            format!("{}\n\n{}", events_block, joined_notes)
+        };
 
         let messages = vec![
             ChatMessage {
@@ -1102,10 +1114,16 @@ impl ReadEngine {
                     }
                 });
 
-                let retry_notes_text: String = retry_notes.iter().enumerate()
+                let joined_retry: String = retry_notes.iter().enumerate()
                     .map(|(i, note)| format_note(i, note, false))
                     .collect::<Vec<_>>()
                     .join("\n\n");
+                let retry_events_block = self.build_events_block(mode).await;
+                let retry_notes_text = if retry_events_block.is_empty() {
+                    joined_retry
+                } else {
+                    format!("{}\n\n{}", retry_events_block, joined_retry)
+                };
 
                 let retry_messages = vec![
                     ChatMessage {
@@ -1166,6 +1184,91 @@ impl ReadEngine {
             has_contradiction,
             reranker_best_score: reranker_best,
         })
+    }
+
+    /// Build a structured EVENTS block from stored episode digests and the
+    /// cross-episode digest. Returns empty string if the query mode does not
+    /// benefit from dated events, or if no digests exist yet (pre-dream).
+    ///
+    /// Events are merged across per-episode and cross-episode digests, deduped
+    /// by (description, date), and sorted chronologically with undated events
+    /// at the end. The block is prepended to the synthesis context so the LLM
+    /// has a clean ISO-dated table to compute against for "how many days
+    /// between X and Y" and "in what order did I bring up X" questions.
+    async fn build_events_block(&self, mode: QueryMode) -> String {
+        // Only applicable to date/sequence-heavy modes. Other modes retain
+        // the narrow note-only context to avoid noise.
+        if !matches!(mode, QueryMode::Computation | QueryMode::Temporal) {
+            return String::new();
+        }
+
+        let per_episode = self.graph_store.get_all_episode_digests().await.unwrap_or_default();
+        let cross_level = self.graph_store.get_all_cross_episode_digests().await.unwrap_or_default();
+
+        if per_episode.is_empty() && cross_level.is_empty() {
+            return String::new();
+        }
+
+        // Dedup key: (lowercased description, date-or-empty). Events from the
+        // cross-episode digest are already deduped by the LLM, but per-episode
+        // events can overlap with each other.
+        let mut seen: HashSet<(String, String)> = HashSet::new();
+        let mut merged: Vec<crate::note::TimedEvent> = Vec::new();
+
+        let push_event = |ev: &crate::note::TimedEvent,
+                          seen: &mut HashSet<(String, String)>,
+                          merged: &mut Vec<crate::note::TimedEvent>| {
+            let key = (
+                ev.description.to_lowercase(),
+                ev.date.clone().unwrap_or_default(),
+            );
+            if seen.insert(key) {
+                merged.push(ev.clone());
+            }
+        };
+
+        for d in &per_episode {
+            for ev in &d.events {
+                push_event(ev, &mut seen, &mut merged);
+            }
+        }
+        for d in &cross_level {
+            for ev in &d.events {
+                push_event(ev, &mut seen, &mut merged);
+            }
+        }
+
+        if merged.is_empty() {
+            return String::new();
+        }
+
+        // Sort: dated events chronologically, undated last (by source_turn if present)
+        merged.sort_by(|a, b| match (&a.date, &b.date) {
+            (Some(ad), Some(bd)) => ad.cmp(bd),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => a.source_turn.unwrap_or(u32::MAX).cmp(&b.source_turn.unwrap_or(u32::MAX)),
+        });
+
+        // Cap to keep the context tight. 400 events ≈ 6-8k tokens; smoke
+        // run showed conv 1 produces ~324 dated events across per-episode +
+        // cross-level digests, so 400 keeps all dated events and a margin of
+        // undated ones for ordering queries.
+        const MAX_EVENTS: usize = 400;
+        if merged.len() > MAX_EVENTS {
+            merged.truncate(MAX_EVENTS);
+        }
+
+        let mut lines: Vec<String> = Vec::with_capacity(merged.len() + 2);
+        lines.push("EVENTS IN THIS CONVERSATION (chronological, dream-extracted):".to_string());
+        for ev in &merged {
+            let date = ev.date.as_deref().unwrap_or("undated");
+            lines.push(format!("- {}: {}", date, ev.description));
+        }
+        lines.push(
+            "\nFor date-arithmetic questions, prefer the dates above over dates mentioned inside note text.".to_string()
+        );
+        lines.join("\n")
     }
 
     /// Check if an answer contains language indicating the LLM couldn't find enough information.

@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 
 use crate::error::Result;
-use crate::note::{AtomicFact, Episode, EpisodeDigest, ForesightSignal, MemoryNote};
+use crate::note::{AtomicFact, CrossEpisodeDigest, Episode, EpisodeDigest, ForesightSignal, MemoryNote};
 
 /// Stores note embeddings and metadata. Provides ANN similarity search.
 #[async_trait]
@@ -122,6 +122,11 @@ pub trait GraphStore: Send + Sync {
     async fn get_all_episode_digests(&self) -> Result<Vec<EpisodeDigest>> { Ok(Vec::new()) }
     /// Get episode IDs that have no digest yet (for incremental dream processing).
     async fn get_undigested_episode_ids(&self) -> Result<Vec<String>> { Ok(Vec::new()) }
+
+    // --- Cross-Episode Digests ---
+
+    async fn upsert_cross_episode_digest(&self, _digest: &CrossEpisodeDigest) -> Result<()> { Ok(()) }
+    async fn get_all_cross_episode_digests(&self) -> Result<Vec<CrossEpisodeDigest>> { Ok(Vec::new()) }
 
     // --- Atomic Fact Metadata (Phase Next) ---
 

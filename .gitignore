@@ -17,6 +17,7 @@ node_modules/
 # Claude Code / Agent tooling
 .claude/
 CLAUDE.md
+CLAUDE.local.md
 SKILL.md
 skill-lock.json
 skills-lock.json
@@ -24,7 +25,7 @@ SKILL.md
 .agents/
 
 # Test results
-.results/
+.results/*
 *.txt
 findings.md
 plan.md

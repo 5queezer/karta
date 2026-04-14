@@ -316,7 +316,65 @@ pub struct EpisodeDigest {
     pub digest_text: String,
     /// ID of the MemoryNote storing the digest_text (for vector search).
     pub digest_note_id: Option<String>,
+    /// Dated events extracted from the episode content. Enables direct
+    /// lookup for date-arithmetic questions (e.g. "days between A and B").
+    /// Events with an unknown date are kept with date = None so they still
+    /// contribute to ordering queries via source_turn.
+    #[serde(default)]
+    pub events: Vec<TimedEvent>,
     pub created_at: DateTime<Utc>,
+}
+
+/// Structured metadata produced by dream-time analysis across multiple
+/// episodes. Complements the per-episode digest with a deduped, normalized
+/// view of entities, aggregations, and events.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CrossEpisodeDigest {
+    pub id: String,
+    /// Opaque scope identifier — typically the karta instance or user scope.
+    pub scope_id: String,
+    /// Entity values tracked across episodes.
+    pub entity_timeline: Vec<EntityTimelineEntry>,
+    /// Aggregations that span episodes (e.g. "12 books read across all conversations").
+    pub cross_aggregations: Vec<AggregationEntry>,
+    /// Merged chronological events across all episodes, deduped.
+    #[serde(default)]
+    pub events: Vec<TimedEvent>,
+    /// Overall topic progression across episodes.
+    pub topic_progression: Vec<String>,
+    /// Retrieval-optimized summary text.
+    pub digest_text: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EntityTimelineEntry {
+    pub name: String,
+    pub entity_type: String,
+    /// Ordered value changes for this entity across episodes.
+    pub changes: Vec<EntityTimelineChange>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EntityTimelineChange {
+    pub episode_id: String,
+    pub value: String,
+}
+
+/// A specific dated event extracted from a conversation. Used to answer
+/// date-arithmetic questions directly ("days between A and B") without
+/// relying on the synthesis model to infer dates from free-form note text.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TimedEvent {
+    /// Human-readable description of the event (e.g. "finished transaction
+    /// management features", "met with Wyatt expressing skepticism").
+    pub description: String,
+    /// ISO YYYY-MM-DD date of the event, or None if undated.
+    #[serde(default)]
+    pub date: Option<String>,
+    /// turn_index of the source note, for provenance / stable ordering.
+    #[serde(default)]
+    pub source_turn: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
