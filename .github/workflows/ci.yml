@@ -25,10 +25,13 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends protobuf-compiler
-        # protobuf-compiler (protoc) is required by lance-encoding's build
-        # script for its .proto files. Without it cargo build fails with
-        # "Could not find `protoc`".
+          sudo apt-get install -y --no-install-recommends \
+            protobuf-compiler \
+            libprotobuf-dev
+        # protobuf-compiler gives us `protoc`; libprotobuf-dev ships the
+        # well-known .proto files (google/protobuf/empty.proto, etc.) that
+        # lance-encoding's encodings_v2_0.proto imports. Without the -dev
+        # package protoc fails with "File not found" on the imports.
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
