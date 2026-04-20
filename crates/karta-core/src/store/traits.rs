@@ -2,7 +2,9 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
 use crate::error::Result;
-use crate::note::{AtomicFact, CrossEpisodeDigest, Episode, EpisodeDigest, ForesightSignal, MemoryNote};
+use crate::note::{
+    AtomicFact, CrossEpisodeDigest, Episode, EpisodeDigest, ForesightSignal, MemoryNote,
+};
 
 /// Stores note embeddings and metadata. Provides ANN similarity search.
 #[async_trait]
@@ -36,7 +38,9 @@ pub trait VectorStore: Send + Sync {
     // --- Atomic Facts (Phase Next) ---
 
     /// Insert or update an atomic fact with its embedding.
-    async fn upsert_fact(&self, _fact: &AtomicFact) -> Result<()> { Ok(()) }
+    async fn upsert_fact(&self, _fact: &AtomicFact) -> Result<()> {
+        Ok(())
+    }
 
     /// Find the top-K most similar atomic facts by embedding.
     async fn find_similar_facts(
@@ -44,17 +48,29 @@ pub trait VectorStore: Send + Sync {
         _embedding: &[f32],
         _top_k: usize,
         _exclude_source_note_ids: &[&str],
-    ) -> Result<Vec<(AtomicFact, f32)>> { Ok(Vec::new()) }
+    ) -> Result<Vec<(AtomicFact, f32)>> {
+        Ok(Vec::new())
+    }
 
     /// Get all facts for a given source note.
-    async fn get_facts_for_note(&self, _note_id: &str) -> Result<Vec<AtomicFact>> { Ok(Vec::new()) }
+    async fn get_facts_for_note(&self, _note_id: &str) -> Result<Vec<AtomicFact>> {
+        Ok(Vec::new())
+    }
 
     // --- ACTIVATE: access bookkeeping (Phase 7 — Trace) ---
 
     /// Record a single access: bump `access_count`, append `at` to
     /// `access_history` (capped at ACCESS_HISTORY_CAP), update `last_accessed_at`.
-    /// Default impl does a read-modify-write via `get` + `upsert`; stores with
-    /// native atomic update support may override for throughput.
+    ///
+    /// WARNING: The default implementation does a non-atomic
+    /// read-modify-write via `get` + `upsert`. Concurrent bumps can lose
+    /// increments, and because the entire note is re-upserted it can also
+    /// clobber concurrent content/context updates from other writers.
+    /// Production stores should override this with a native atomic update
+    /// (CAS / partial-row merge). Only safe for single-writer workloads or
+    /// when callers serialize access to each note id themselves. The
+    /// ACTIVATE phase_trace sample rate (`trace_sample_rate`) is the main
+    /// knob for bounding the write pressure this path generates.
     async fn bump_access(&self, id: &str, at: DateTime<Utc>) -> Result<()> {
         if let Some(mut note) = self.get(id).await? {
             note.record_access(at);
@@ -70,6 +86,22 @@ pub trait VectorStore: Send + Sync {
             self.bump_access(id, at).await?;
         }
         Ok(())
+    }
+
+    /// Find the most recent note in a given session (by turn_index, then
+    /// created_at). Used by the write path to re-hydrate the session-tail
+    /// cache after a restart.
+    ///
+    /// Default impl scans every note via `get_all()` and filters in-memory
+    /// (O(N) per session cold-start). Stores with indexed scan support
+    /// should override to push the filter down and use an ORDER BY.
+    async fn find_latest_by_session(&self, session_id: &str) -> Result<Option<MemoryNote>> {
+        // TODO: O(N) scan — Lance override pushes this to a filtered query.
+        let all = self.get_all().await?;
+        Ok(all
+            .into_iter()
+            .filter(|n| n.session_id.as_deref() == Some(session_id))
+            .max_by_key(|n| (n.turn_index.unwrap_or(0), n.created_at)))
     }
 }
 
@@ -148,6 +180,22 @@ pub trait GraphStore: Send + Sync {
         Ok(())
     }
 
+    /// Batched Hebbian bump for multiple co-activated pairs. Default impl
+    /// loops the single-pair method so stores that don't override keep
+    /// working. Stores with transaction support should override to commit
+    /// the whole batch atomically (see `SqliteGraphStore`).
+    async fn bump_link_weights_batch(
+        &self,
+        pairs: &[(&str, &str)],
+        delta: f32,
+        max: f32,
+    ) -> Result<()> {
+        for (a, b) in pairs {
+            let _ = self.bump_link_weight(a, b, delta, max).await;
+        }
+        Ok(())
+    }
+
     /// Apply multiplicative decay to every semantic edge: `weight = max(1.0, weight * factor)`.
     /// Called from `ForgetConfig` sweep. Default is a no-op.
     async fn decay_link_weights(&self, _factor: f32) -> Result<usize> {
@@ -165,7 +213,10 @@ pub trait GraphStore: Send + Sync {
     ) -> Result<()>;
 
     /// Get evolution history for a note.
-    async fn get_evolution_history(&self, note_id: &str) -> Result<Vec<crate::note::EvolutionRecord>>;
+    async fn get_evolution_history(
+        &self,
+        note_id: &str,
+    ) -> Result<Vec<crate::note::EvolutionRecord>>;
 
     // --- Dream state ---
 
@@ -180,51 +231,115 @@ pub trait GraphStore: Send + Sync {
 
     // --- Foresight signals (Phase 2B.2) ---
 
-    async fn upsert_foresight(&self, _signal: &ForesightSignal) -> Result<()> { Ok(()) }
-    async fn get_active_foresights(&self) -> Result<Vec<ForesightSignal>> { Ok(Vec::new()) }
-    async fn expire_foresights(&self, _before: chrono::DateTime<chrono::Utc>) -> Result<usize> { Ok(0) }
-    async fn get_foresights_for_note(&self, _note_id: &str) -> Result<Vec<ForesightSignal>> { Ok(Vec::new()) }
+    async fn upsert_foresight(&self, _signal: &ForesightSignal) -> Result<()> {
+        Ok(())
+    }
+    async fn get_active_foresights(&self) -> Result<Vec<ForesightSignal>> {
+        Ok(Vec::new())
+    }
+    async fn expire_foresights(&self, _before: chrono::DateTime<chrono::Utc>) -> Result<usize> {
+        Ok(0)
+    }
+    async fn get_foresights_for_note(&self, _note_id: &str) -> Result<Vec<ForesightSignal>> {
+        Ok(Vec::new())
+    }
 
     // --- Episodes (Phase 2B.1) ---
 
-    async fn upsert_episode(&self, _episode: &Episode) -> Result<()> { Ok(()) }
-    async fn get_episode(&self, _id: &str) -> Result<Option<Episode>> { Ok(None) }
-    async fn get_episodes_for_session(&self, _session_id: &str) -> Result<Vec<Episode>> { Ok(Vec::new()) }
-    async fn add_note_to_episode(&self, _note_id: &str, _episode_id: &str) -> Result<()> { Ok(()) }
-    async fn get_episode_for_note(&self, _note_id: &str) -> Result<Option<String>> { Ok(None) }
-    async fn get_notes_for_episode(&self, _episode_id: &str) -> Result<Vec<String>> { Ok(Vec::new()) }
+    async fn upsert_episode(&self, _episode: &Episode) -> Result<()> {
+        Ok(())
+    }
+    async fn get_episode(&self, _id: &str) -> Result<Option<Episode>> {
+        Ok(None)
+    }
+    async fn get_episodes_for_session(&self, _session_id: &str) -> Result<Vec<Episode>> {
+        Ok(Vec::new())
+    }
+    async fn add_note_to_episode(&self, _note_id: &str, _episode_id: &str) -> Result<()> {
+        Ok(())
+    }
+    async fn get_episode_for_note(&self, _note_id: &str) -> Result<Option<String>> {
+        Ok(None)
+    }
+    async fn get_notes_for_episode(&self, _episode_id: &str) -> Result<Vec<String>> {
+        Ok(Vec::new())
+    }
 
     // --- Profiles (Phase 2B.3) ---
 
-    async fn upsert_profile(&self, _entity_id: &str, _note_id: &str) -> Result<()> { Ok(()) }
-    async fn get_profile_note_id(&self, _entity_id: &str) -> Result<Option<String>> { Ok(None) }
-    async fn get_all_profiles(&self) -> Result<Vec<(String, String)>> { Ok(Vec::new()) }
+    async fn upsert_profile(&self, _entity_id: &str, _note_id: &str) -> Result<()> {
+        Ok(())
+    }
+    async fn get_profile_note_id(&self, _entity_id: &str) -> Result<Option<String>> {
+        Ok(None)
+    }
+    async fn get_all_profiles(&self) -> Result<Vec<(String, String)>> {
+        Ok(Vec::new())
+    }
 
     // --- Episode Digests (Phase Next) ---
 
-    async fn upsert_episode_digest(&self, _digest: &EpisodeDigest) -> Result<()> { Ok(()) }
-    async fn get_episode_digest(&self, _episode_id: &str) -> Result<Option<EpisodeDigest>> { Ok(None) }
-    async fn get_all_episode_digests(&self) -> Result<Vec<EpisodeDigest>> { Ok(Vec::new()) }
+    async fn upsert_episode_digest(&self, _digest: &EpisodeDigest) -> Result<()> {
+        Ok(())
+    }
+    async fn get_episode_digest(&self, _episode_id: &str) -> Result<Option<EpisodeDigest>> {
+        Ok(None)
+    }
+    async fn get_all_episode_digests(&self) -> Result<Vec<EpisodeDigest>> {
+        Ok(Vec::new())
+    }
     /// Get episode IDs that have no digest yet (for incremental dream processing).
-    async fn get_undigested_episode_ids(&self) -> Result<Vec<String>> { Ok(Vec::new()) }
+    async fn get_undigested_episode_ids(&self) -> Result<Vec<String>> {
+        Ok(Vec::new())
+    }
 
     // --- Cross-Episode Digests ---
 
-    async fn upsert_cross_episode_digest(&self, _digest: &CrossEpisodeDigest) -> Result<()> { Ok(()) }
-    async fn get_all_cross_episode_digests(&self) -> Result<Vec<CrossEpisodeDigest>> { Ok(Vec::new()) }
+    async fn upsert_cross_episode_digest(&self, _digest: &CrossEpisodeDigest) -> Result<()> {
+        Ok(())
+    }
+    async fn get_all_cross_episode_digests(&self) -> Result<Vec<CrossEpisodeDigest>> {
+        Ok(Vec::new())
+    }
 
     // --- Atomic Fact Metadata (Phase Next) ---
 
-    async fn record_fact(&self, _fact_id: &str, _source_note_id: &str, _ordinal: u32, _subject: Option<&str>) -> Result<()> { Ok(()) }
-    async fn get_facts_by_subject(&self, _subject: &str) -> Result<Vec<String>> { Ok(Vec::new()) }
+    async fn record_fact(
+        &self,
+        _fact_id: &str,
+        _source_note_id: &str,
+        _ordinal: u32,
+        _subject: Option<&str>,
+    ) -> Result<()> {
+        Ok(())
+    }
+    async fn get_facts_by_subject(&self, _subject: &str) -> Result<Vec<String>> {
+        Ok(Vec::new())
+    }
 
     // --- Episode Links (Phase Next) ---
 
-    async fn add_episode_link(&self, _from_id: &str, _to_id: &str, _link_type: &str, _entity: Option<&str>, _reason: &str) -> Result<()> { Ok(()) }
+    async fn add_episode_link(
+        &self,
+        _from_id: &str,
+        _to_id: &str,
+        _link_type: &str,
+        _entity: Option<&str>,
+        _reason: &str,
+    ) -> Result<()> {
+        Ok(())
+    }
     /// Returns (linked_episode_id, link_type, entity).
-    async fn get_episode_links(&self, _episode_id: &str) -> Result<Vec<(String, String, Option<String>)>> { Ok(Vec::new()) }
+    async fn get_episode_links(
+        &self,
+        _episode_id: &str,
+    ) -> Result<Vec<(String, String, Option<String>)>> {
+        Ok(Vec::new())
+    }
     /// Get all episode IDs linked to a given entity via entity_continuity.
-    async fn get_episodes_for_entity(&self, _entity: &str) -> Result<Vec<String>> { Ok(Vec::new()) }
+    async fn get_episodes_for_entity(&self, _entity: &str) -> Result<Vec<String>> {
+        Ok(Vec::new())
+    }
 
     // --- Lifecycle ---
 

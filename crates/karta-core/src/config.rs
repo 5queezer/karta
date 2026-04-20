@@ -163,7 +163,12 @@ impl Default for ReadConfig {
 ///
 /// Feature-flagged via `enabled`. Also honours the `KARTA_ACTIVATE_ENABLED`
 /// environment variable so benchmarks can toggle without editing TOML.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Custom `Deserialize` impl: after parsing, any per-mode channel-weight
+/// map the user supplied is unioned over the default matrix so a partial
+/// TOML override (e.g. just tweaking `channel_weights.Standard.ann`)
+/// preserves weights for the other modes.
+#[derive(Debug, Clone, Serialize)]
 pub struct ActivateConfig {
     /// Master switch. Defaults to `false` so the existing `search_wide()`
     /// scalar scorer remains the production path until this is validated.
@@ -184,53 +189,131 @@ pub struct ActivateConfig {
     pub pas_window: usize,
     /// Fraction of queries that run phase_trace writes. 1.0 = every query.
     pub trace_sample_rate: f32,
+    /// Anchor cap: how many top ANN hits are used as seeds for co-activation
+    /// and integration BFS.
+    pub anchor_top_k: usize,
+    /// Facts channel: minimum atomic-fact similarity score to expand to the parent note.
+    pub facts_min_score: f32,
+    /// Integration BFS cap: max neighbors accumulated before early termination.
+    pub integration_bfs_cap: usize,
     /// Per-QueryMode channel weight overrides. Key = channel name.
     /// Channels: "ann", "keyword", "hebbian", "actr", "integration", "rerank",
     /// "pas", "facts", "foresight", "profile".
-    #[serde(default)]
     pub channel_weights: HashMap<String, HashMap<String, f32>>,
+}
+
+fn default_activate_channel_weights() -> HashMap<String, HashMap<String, f32>> {
+    use crate::read::QueryMode;
+
+    fn mk(pairs: &[(&str, f32)]) -> HashMap<String, f32> {
+        pairs.iter().map(|(k, v)| (k.to_string(), *v)).collect()
+    }
+    let mut m = HashMap::new();
+    m.insert(
+        QueryMode::Standard.as_str().into(),
+        mk(&[
+            ("ann", 1.0),
+            ("keyword", 0.5),
+            ("hebbian", 0.7),
+            ("actr", 0.3),
+            ("integration", 0.5),
+            ("rerank", 1.0),
+            ("pas", 0.0),
+            ("facts", 0.6),
+            ("foresight", 0.4),
+            ("profile", 1.2),
+        ]),
+    );
+    m.insert(
+        QueryMode::Recency.as_str().into(),
+        mk(&[
+            ("ann", 0.6),
+            ("keyword", 0.4),
+            ("hebbian", 0.3),
+            ("actr", 1.2),
+            ("integration", 0.3),
+            ("rerank", 0.6),
+            ("pas", 0.0),
+            ("facts", 0.4),
+            ("foresight", 0.8),
+            ("profile", 0.8),
+        ]),
+    );
+    m.insert(
+        QueryMode::Breadth.as_str().into(),
+        mk(&[
+            ("ann", 1.0),
+            ("keyword", 0.5),
+            ("hebbian", 1.0),
+            ("actr", 0.3),
+            ("integration", 0.8),
+            ("rerank", 0.8),
+            ("pas", 0.0),
+            ("facts", 0.5),
+            ("foresight", 0.4),
+            ("profile", 1.0),
+        ]),
+    );
+    m.insert(
+        QueryMode::Computation.as_str().into(),
+        mk(&[
+            ("ann", 0.8),
+            ("keyword", 0.8),
+            ("hebbian", 0.4),
+            ("actr", 0.3),
+            ("integration", 0.6),
+            ("rerank", 1.2),
+            ("pas", 0.0),
+            ("facts", 1.0),
+            ("foresight", 0.5),
+            ("profile", 0.8),
+        ]),
+    );
+    m.insert(
+        QueryMode::Temporal.as_str().into(),
+        mk(&[
+            ("ann", 0.3),
+            ("keyword", 0.3),
+            ("hebbian", 0.0),
+            ("actr", 1.0),
+            ("integration", 0.2),
+            ("rerank", 0.0),
+            ("pas", 1.5),
+            ("facts", 0.2),
+            ("foresight", 0.3),
+            ("profile", 0.4),
+        ]),
+    );
+    m.insert(
+        QueryMode::Existence.as_str().into(),
+        mk(&[
+            ("ann", 1.0),
+            ("keyword", 0.8),
+            ("hebbian", 0.5),
+            ("actr", 0.5),
+            ("integration", 0.5),
+            ("rerank", 1.2),
+            ("pas", 0.0),
+            ("facts", 0.9),
+            ("foresight", 0.5),
+            ("profile", 1.0),
+        ]),
+    );
+    m
+}
+
+fn default_anchor_top_k() -> usize {
+    10
+}
+fn default_facts_min_score() -> f32 {
+    0.3
+}
+fn default_integration_bfs_cap() -> usize {
+    64
 }
 
 impl Default for ActivateConfig {
     fn default() -> Self {
-        // Channel-weight matrix seeded per QueryMode.  QueryMode variants are
-        // stringified via their Debug form so TOML overrides read naturally
-        // (e.g. `[read.activate.channel_weights.Temporal] pas = 2.0`).
-        fn mk(pairs: &[(&str, f32)]) -> HashMap<String, f32> {
-            pairs.iter().map(|(k, v)| (k.to_string(), *v)).collect()
-        }
-        let mut m = HashMap::new();
-        m.insert("Standard".into(), mk(&[
-            ("ann", 1.0), ("keyword", 0.5), ("hebbian", 0.7), ("actr", 0.3),
-            ("integration", 0.5), ("rerank", 1.0), ("pas", 0.0),
-            ("facts", 0.6), ("foresight", 0.4), ("profile", 1.2),
-        ]));
-        m.insert("Recency".into(), mk(&[
-            ("ann", 0.6), ("keyword", 0.4), ("hebbian", 0.3), ("actr", 1.2),
-            ("integration", 0.3), ("rerank", 0.6), ("pas", 0.0),
-            ("facts", 0.4), ("foresight", 0.8), ("profile", 0.8),
-        ]));
-        m.insert("Breadth".into(), mk(&[
-            ("ann", 1.0), ("keyword", 0.5), ("hebbian", 1.0), ("actr", 0.3),
-            ("integration", 0.8), ("rerank", 0.8), ("pas", 0.0),
-            ("facts", 0.5), ("foresight", 0.4), ("profile", 1.0),
-        ]));
-        m.insert("Computation".into(), mk(&[
-            ("ann", 0.8), ("keyword", 0.8), ("hebbian", 0.4), ("actr", 0.3),
-            ("integration", 0.6), ("rerank", 1.2), ("pas", 0.0),
-            ("facts", 1.0), ("foresight", 0.5), ("profile", 0.8),
-        ]));
-        m.insert("Temporal".into(), mk(&[
-            ("ann", 0.3), ("keyword", 0.3), ("hebbian", 0.0), ("actr", 1.0),
-            ("integration", 0.2), ("rerank", 0.0), ("pas", 1.5),
-            ("facts", 0.2), ("foresight", 0.3), ("profile", 0.4),
-        ]));
-        m.insert("Existence".into(), mk(&[
-            ("ann", 1.0), ("keyword", 0.8), ("hebbian", 0.5), ("actr", 0.5),
-            ("integration", 0.5), ("rerank", 1.2), ("pas", 0.0),
-            ("facts", 0.9), ("foresight", 0.5), ("profile", 1.0),
-        ]));
-
         Self {
             enabled: false,
             act_r_decay_d: 0.5,
@@ -241,8 +324,103 @@ impl Default for ActivateConfig {
             rrf_k: 60.0,
             pas_window: 6,
             trace_sample_rate: 1.0,
-            channel_weights: m,
+            anchor_top_k: default_anchor_top_k(),
+            facts_min_score: default_facts_min_score(),
+            integration_bfs_cap: default_integration_bfs_cap(),
+            channel_weights: default_activate_channel_weights(),
         }
+    }
+}
+
+// Helper shadow struct for field-level defaults in the custom Deserialize
+// impl below. Every field has a sensible default so a partial TOML stanza
+// (e.g. `[read.activate] enabled = true`) still deserializes cleanly.
+#[derive(Deserialize)]
+struct ActivateConfigShadow {
+    #[serde(default)]
+    enabled: bool,
+    #[serde(default = "default_act_r_decay_d")]
+    act_r_decay_d: f64,
+    #[serde(default = "default_act_r_min_activation")]
+    act_r_min_activation: f64,
+    #[serde(default = "default_hebbian_weight_step")]
+    hebbian_weight_step: f32,
+    #[serde(default = "default_hebbian_max_weight")]
+    hebbian_max_weight: f32,
+    #[serde(default = "default_hebbian_neighbors_per_anchor")]
+    hebbian_neighbors_per_anchor: usize,
+    #[serde(default = "default_rrf_k")]
+    rrf_k: f32,
+    #[serde(default = "default_pas_window")]
+    pas_window: usize,
+    #[serde(default = "default_trace_sample_rate")]
+    trace_sample_rate: f32,
+    #[serde(default = "default_anchor_top_k")]
+    anchor_top_k: usize,
+    #[serde(default = "default_facts_min_score")]
+    facts_min_score: f32,
+    #[serde(default = "default_integration_bfs_cap")]
+    integration_bfs_cap: usize,
+    #[serde(default)]
+    channel_weights: HashMap<String, HashMap<String, f32>>,
+}
+
+fn default_act_r_decay_d() -> f64 {
+    0.5
+}
+fn default_act_r_min_activation() -> f64 {
+    -0.5
+}
+fn default_hebbian_weight_step() -> f32 {
+    0.05
+}
+fn default_hebbian_max_weight() -> f32 {
+    3.0
+}
+fn default_hebbian_neighbors_per_anchor() -> usize {
+    5
+}
+fn default_rrf_k() -> f32 {
+    60.0
+}
+fn default_pas_window() -> usize {
+    6
+}
+fn default_trace_sample_rate() -> f32 {
+    1.0
+}
+
+impl<'de> Deserialize<'de> for ActivateConfig {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let shadow = ActivateConfigShadow::deserialize(deserializer)?;
+        // Union user-provided per-mode maps over the default matrix so a
+        // partial override preserves defaults for the other modes (and any
+        // unspecified channels within a mode).
+        let mut merged = default_activate_channel_weights();
+        for (mode_key, user_map) in shadow.channel_weights {
+            let entry = merged.entry(mode_key).or_default();
+            for (ch, w) in user_map {
+                entry.insert(ch, w);
+            }
+        }
+        Ok(Self {
+            enabled: shadow.enabled,
+            act_r_decay_d: shadow.act_r_decay_d,
+            act_r_min_activation: shadow.act_r_min_activation,
+            hebbian_weight_step: shadow.hebbian_weight_step,
+            hebbian_max_weight: shadow.hebbian_max_weight,
+            hebbian_neighbors_per_anchor: shadow.hebbian_neighbors_per_anchor,
+            rrf_k: shadow.rrf_k,
+            pas_window: shadow.pas_window,
+            trace_sample_rate: shadow.trace_sample_rate,
+            anchor_top_k: shadow.anchor_top_k,
+            facts_min_score: shadow.facts_min_score,
+            integration_bfs_cap: shadow.integration_bfs_cap,
+            channel_weights: merged,
+        })
     }
 }
 
@@ -327,8 +505,12 @@ pub struct ForgetConfig {
     pub link_weight_decay: f32,
 }
 
-fn default_actr_floor() -> f32 { -1.0 }
-fn default_link_decay() -> f32 { 0.99 }
+fn default_actr_floor() -> f32 {
+    -1.0
+}
+fn default_link_decay() -> f32 {
+    0.99
+}
 
 impl Default for ForgetConfig {
     fn default() -> Self {
@@ -340,5 +522,67 @@ impl Default for ForgetConfig {
             actr_decay_floor: default_actr_floor(),
             link_weight_decay: default_link_decay(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A partial `channel_weights` override must not wipe defaults for other
+    /// modes or untouched channels within the overridden mode.
+    #[test]
+    fn channel_weights_partial_override_merges_with_defaults() {
+        let toml_str = r#"
+            enabled = true
+            [channel_weights.Standard]
+            ann = 2.5
+        "#;
+        let cfg: ActivateConfig = toml::from_str(toml_str).expect("parse");
+        assert!(cfg.enabled);
+
+        // Other modes still populated with defaults
+        for mode in ["Recency", "Breadth", "Computation", "Temporal", "Existence"] {
+            let m = cfg
+                .channel_weights
+                .get(mode)
+                .unwrap_or_else(|| panic!("missing default map for {}", mode));
+            assert!(!m.is_empty(), "{} map was dropped", mode);
+        }
+
+        // Standard: override applied, remaining channels retain defaults
+        let std_map = cfg.channel_weights.get("Standard").expect("Standard map");
+        assert_eq!(std_map.get("ann").copied(), Some(2.5));
+        assert!(
+            std_map.contains_key("keyword"),
+            "default channels preserved"
+        );
+        assert!(std_map.contains_key("rerank"), "default channels preserved");
+    }
+
+    /// Defaults survive when TOML omits channel_weights entirely.
+    #[test]
+    fn channel_weights_missing_yields_defaults() {
+        let cfg: ActivateConfig = toml::from_str("enabled = true").expect("parse");
+        assert!(cfg.enabled);
+        for mode in [
+            "Standard",
+            "Recency",
+            "Breadth",
+            "Computation",
+            "Temporal",
+            "Existence",
+        ] {
+            assert!(cfg.channel_weights.contains_key(mode), "missing {}", mode);
+        }
+    }
+
+    /// Missing ACTIVATE-added scalar fields fall back to the documented defaults.
+    #[test]
+    fn scalar_fields_default_when_missing() {
+        let cfg: ActivateConfig = toml::from_str("enabled = true").expect("parse");
+        assert_eq!(cfg.anchor_top_k, 10);
+        assert!((cfg.facts_min_score - 0.3).abs() < 1e-6);
+        assert_eq!(cfg.integration_bfs_cap, 64);
     }
 }

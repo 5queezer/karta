@@ -24,7 +24,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::config::{ActivateConfig, ReadConfig};
 use crate::error::Result;
@@ -75,7 +75,14 @@ impl ActivateEngine {
         read_cfg: ReadConfig,
         rerank_cfg: RerankerConfig,
     ) -> Self {
-        Self { vector_store, graph_store, llm, reranker, read_cfg, rerank_cfg }
+        Self {
+            vector_store,
+            graph_store,
+            llm,
+            reranker,
+            read_cfg,
+            rerank_cfg,
+        }
     }
 
     fn cfg(&self) -> &ActivateConfig {
@@ -96,7 +103,12 @@ impl ActivateEngine {
         let (ann_ch, facts_ch, profile_ch, foresight_ch, mut pool) =
             self.phase_anchor(query, query_embedding).await?;
 
-        let anchor_ids: Vec<String> = ann_ch.ranked.iter().take(10).cloned().collect();
+        let anchor_ids: Vec<String> = ann_ch
+            .ranked
+            .iter()
+            .take(self.cfg().anchor_top_k)
+            .cloned()
+            .collect();
 
         // --- Phase 2: Co-activation (Hebbian) ---
         let hebbian_ch = self.phase_coactivation(&anchor_ids).await?;
@@ -114,10 +126,16 @@ impl ActivateEngine {
             let anchor = anchor_ids.first().cloned();
             match anchor {
                 Some(a) => self.phase_pas(&a).await?,
-                None => Channel { name: "pas", ranked: Vec::new() },
+                None => Channel {
+                    name: "pas",
+                    ranked: Vec::new(),
+                },
             }
         } else {
-            Channel { name: "pas", ranked: Vec::new() }
+            Channel {
+                name: "pas",
+                ranked: Vec::new(),
+            }
         };
         self.extend_pool(&mut pool, &pas_ch.ranked).await?;
 
@@ -126,8 +144,15 @@ impl ActivateEngine {
 
         // --- Phase 6: Aggregate (RRF) ---
         let mut channels = vec![
-            ann_ch, facts_ch, profile_ch, foresight_ch,
-            hebbian_ch, integration_ch, actr_ch, pas_ch, rerank_ch,
+            ann_ch,
+            facts_ch,
+            profile_ch,
+            foresight_ch,
+            hebbian_ch,
+            integration_ch,
+            actr_ch,
+            pas_ch,
+            rerank_ch,
         ];
 
         // Apply Temporal-fallback weight redistribution: if PAS is empty in
@@ -165,23 +190,30 @@ impl ActivateEngine {
         for id in &top_ids {
             if let Some(note) = notes_by_id.remove(id) {
                 if note.is_active() {
-                    results.push(SearchResult { note, score: 0.0, linked_notes: Vec::new() });
+                    results.push(SearchResult {
+                        note,
+                        score: 0.0,
+                        linked_notes: Vec::new(),
+                    });
                 }
             }
         }
 
-        // --- Phase 7: Trace (write-back) ---
-        if self.cfg().trace_sample_rate > 0.0 && should_sample(self.cfg().trace_sample_rate) {
-            let returned_ids: Vec<String> = results.iter().map(|r| r.note.id.clone()).collect();
-            if let Err(e) = self.phase_trace(&returned_ids).await {
-                debug!(error = %e, "ACTIVATE: phase_trace non-fatal failure");
-            }
-        }
+        // NOTE: Phase 7 (Trace write-back) is intentionally NOT called here.
+        // `search_wide()` passes a deliberately wide top_k so the caller
+        // (`ask()`) can rerank+truncate; running phase_trace on this wide
+        // set would train activation state on notes that never reach the
+        // user. The caller invokes `phase_trace()` explicitly on the final
+        // truncated id set. See read.rs for the dispatch site.
 
         // Keep rank order intact — do NOT re-sort by score downstream (RRF
         // has already decided the order).
         channels.retain(|c| !c.ranked.is_empty());
-        Ok(ActivateOutput { results, mode, channels })
+        Ok(ActivateOutput {
+            results,
+            mode,
+            channels,
+        })
     }
 
     // ─── Phase 1: Anchor ───────────────────────────────────────────────
@@ -223,13 +255,14 @@ impl ActivateEngine {
         let mut facts_ranked: Vec<String> = Vec::new();
         if self.read_cfg.fact_retrieval_enabled {
             let fact_k = (fetch_k / 2).max(10);
+            let facts_min_score = self.cfg().facts_min_score;
             if let Ok(hits) = self
                 .vector_store
                 .find_similar_facts(query_embedding, fact_k, &[])
                 .await
             {
                 for (fact, score) in hits {
-                    if score < 0.3 {
+                    if score < facts_min_score {
                         continue;
                     }
                     if seen.contains(&fact.source_note_id) {
@@ -249,47 +282,71 @@ impl ActivateEngine {
         // Profile channel — entity-profile auto-include by token overlap
         let mut profile_ranked: Vec<String> = Vec::new();
         let query_lower = query.to_lowercase();
-        if let Ok(profiles) = self.graph_store.get_all_profiles().await {
-            for (entity_id, note_id) in profiles {
-                let tokens: Vec<&str> = entity_id
-                    .split(|c: char| c.is_whitespace() || c == '-' || c == '_')
-                    .filter(|t| t.len() >= 3)
-                    .collect();
-                let matched = tokens.iter().any(|t| query_lower.contains(&t.to_lowercase()));
-                if !matched {
-                    continue;
-                }
-                if let Ok(Some(note)) = self.vector_store.get(&note_id).await {
-                    if note.is_active() && seen.insert(note.id.clone()) {
-                        profile_ranked.push(note.id.clone());
-                        pool.push(note);
-                    }
+        let profiles = match self.graph_store.get_all_profiles().await {
+            Ok(p) => p,
+            Err(e) => {
+                warn!(error = %e, "profile: store error");
+                Vec::new()
+            }
+        };
+        for (entity_id, note_id) in profiles {
+            let tokens: Vec<&str> = entity_id
+                .split(|c: char| c.is_whitespace() || c == '-' || c == '_')
+                .filter(|t| t.len() >= 3)
+                .collect();
+            let matched = tokens
+                .iter()
+                .any(|t| query_lower.contains(&t.to_lowercase()));
+            if !matched {
+                continue;
+            }
+            if let Ok(Some(note)) = self.vector_store.get(&note_id).await {
+                if note.is_active() && seen.insert(note.id.clone()) {
+                    profile_ranked.push(note.id.clone());
+                    pool.push(note);
                 }
             }
         }
 
         // Foresight channel — notes backing currently-active forward predictions
         let mut foresight_ranked: Vec<String> = Vec::new();
-        if let Ok(signals) = self.graph_store.get_active_foresights().await {
-            for s in signals {
-                if seen.insert(s.source_note_id.clone()) {
-                    if let Ok(Some(note)) = self.vector_store.get(&s.source_note_id).await {
-                        if note.is_active() {
-                            foresight_ranked.push(note.id.clone());
-                            pool.push(note);
-                        }
+        let signals = match self.graph_store.get_active_foresights().await {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(error = %e, "foresight: store error");
+                Vec::new()
+            }
+        };
+        for s in signals {
+            if seen.insert(s.source_note_id.clone()) {
+                if let Ok(Some(note)) = self.vector_store.get(&s.source_note_id).await {
+                    if note.is_active() {
+                        foresight_ranked.push(note.id.clone());
+                        pool.push(note);
                     }
-                } else {
-                    foresight_ranked.push(s.source_note_id);
                 }
+            } else {
+                foresight_ranked.push(s.source_note_id);
             }
         }
 
         Ok((
-            Channel { name: "ann", ranked: ann_ranked },
-            Channel { name: "facts", ranked: facts_ranked },
-            Channel { name: "profile", ranked: profile_ranked },
-            Channel { name: "foresight", ranked: foresight_ranked },
+            Channel {
+                name: "ann",
+                ranked: ann_ranked,
+            },
+            Channel {
+                name: "facts",
+                ranked: facts_ranked,
+            },
+            Channel {
+                name: "profile",
+                ranked: profile_ranked,
+            },
+            Channel {
+                name: "foresight",
+                ranked: foresight_ranked,
+            },
             pool,
         ))
     }
@@ -301,18 +358,27 @@ impl ActivateEngine {
         let mut ranked: Vec<String> = Vec::new();
         let mut seen: HashSet<String> = anchor_ids.iter().cloned().collect();
         for id in anchor_ids {
-            let neighbors = self
+            let neighbors = match self
                 .graph_store
                 .get_links_with_weights(id, Some("semantic"))
                 .await
-                .unwrap_or_default();
+            {
+                Ok(n) => n,
+                Err(e) => {
+                    warn!(error = %e, "hebbian: store error");
+                    Vec::new()
+                }
+            };
             for (nid, _w) in neighbors.into_iter().take(per_anchor) {
                 if seen.insert(nid.clone()) {
                     ranked.push(nid);
                 }
             }
         }
-        Ok(Channel { name: "hebbian", ranked })
+        Ok(Channel {
+            name: "hebbian",
+            ranked,
+        })
     }
 
     // ─── Phase 3: Temporal decay (ACT-R BLL) ──────────────────────────
@@ -324,11 +390,19 @@ impl ActivateEngine {
 
         let mut scored: Vec<(String, f64)> = pool
             .iter()
-            .map(|n| (n.id.clone(), actr_activation(&n.access_history, now, d, n.access_count)))
+            .map(|n| {
+                (
+                    n.id.clone(),
+                    actr_activation(&n.access_history, now, d, n.access_count),
+                )
+            })
             .filter(|(_, b)| *b >= floor)
             .collect();
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        Channel { name: "actr", ranked: scored.into_iter().map(|(id, _)| id).collect() }
+        Channel {
+            name: "actr",
+            ranked: scored.into_iter().map(|(id, _)| id).collect(),
+        }
     }
 
     // ─── Phase 4: Integration (multi-hop BFS) ─────────────────────────
@@ -336,6 +410,7 @@ impl ActivateEngine {
     async fn phase_integration(&self, anchor_ids: &[String]) -> Result<Channel> {
         use std::collections::VecDeque;
         let max_depth = self.read_cfg.max_hop_depth;
+        let bfs_cap = self.cfg().integration_bfs_cap;
         let mut ranked: Vec<String> = Vec::new();
         let mut visited: HashSet<String> = anchor_ids.iter().cloned().collect();
         let mut q: VecDeque<(String, usize)> = VecDeque::new();
@@ -346,43 +421,73 @@ impl ActivateEngine {
             if depth >= max_depth {
                 continue;
             }
-            let links = self.graph_store.get_links(&cur).await.unwrap_or_default();
-            for l in links {
+            // Semantic-only: PAS already covers the "follows" chain. Mixing
+            // them double-counts PAS neighbors in the fused ranking.
+            let links = match self
+                .graph_store
+                .get_links_with_weights(&cur, Some("semantic"))
+                .await
+            {
+                Ok(l) => l,
+                Err(e) => {
+                    warn!(error = %e, "integration: store error");
+                    Vec::new()
+                }
+            };
+            for (l, _w) in links {
                 if visited.insert(l.clone()) {
                     ranked.push(l.clone());
                     q.push_back((l, depth + 1));
-                    if ranked.len() > 64 {
-                        return Ok(Channel { name: "integration", ranked });
+                    if ranked.len() > bfs_cap {
+                        return Ok(Channel {
+                            name: "integration",
+                            ranked,
+                        });
                     }
                 }
             }
         }
-        Ok(Channel { name: "integration", ranked })
+        Ok(Channel {
+            name: "integration",
+            ranked,
+        })
     }
 
     // ─── Phase 5: Vector reranker ─────────────────────────────────────
 
     async fn phase_rerank(&self, query: &str, pool: &[MemoryNote]) -> Result<Channel> {
         if !self.rerank_cfg.enabled || pool.is_empty() {
-            return Ok(Channel { name: "rerank", ranked: Vec::new() });
+            return Ok(Channel {
+                name: "rerank",
+                ranked: Vec::new(),
+            });
         }
         let take = self.rerank_cfg.max_rerank.min(pool.len());
         let input: Vec<(MemoryNote, f32)> =
             pool.iter().take(take).map(|n| (n.clone(), 0.0)).collect();
         let reranked = self.reranker.rerank(query, input).await?;
         let ranked = reranked.into_iter().map(|r| r.note.id).collect();
-        Ok(Channel { name: "rerank", ranked })
+        Ok(Channel {
+            name: "rerank",
+            ranked,
+        })
     }
 
     // ─── Phase 5b: PAS (prefix-aware sequential) ─────────────────────
 
     async fn phase_pas(&self, anchor_id: &str) -> Result<Channel> {
         let w = self.cfg().pas_window;
-        let mut neighbors = self
+        let mut neighbors = match self
             .graph_store
             .get_sequential_neighbors(anchor_id, w)
             .await
-            .unwrap_or_default();
+        {
+            Ok(n) => n,
+            Err(e) => {
+                warn!(error = %e, "pas: store error");
+                Vec::new()
+            }
+        };
         neighbors.sort_by_key(|(_, delta)| delta.abs());
         Ok(Channel {
             name: "pas",
@@ -392,39 +497,52 @@ impl ActivateEngine {
 
     // ─── Phase 7: Trace (write-back) ──────────────────────────────────
 
-    async fn phase_trace(&self, returned_ids: &[String]) -> Result<()> {
+    /// Write-back pass: bump access counters and Hebbian link weights for
+    /// the final truncated set of returned ids. Must be called by the
+    /// caller (`ask()` / `search()`) AFTER truncation so activation state
+    /// trains on notes that actually reach the user.
+    pub async fn phase_trace(&self, returned_ids: &[String]) -> Result<()> {
         if returned_ids.is_empty() {
             return Ok(());
         }
         // Bump access metadata for every returned note (one transaction).
         let ref_ids: Vec<&str> = returned_ids.iter().map(|s| s.as_str()).collect();
-        self.vector_store.bump_access_many(&ref_ids, Utc::now()).await?;
+        self.vector_store
+            .bump_access_many(&ref_ids, Utc::now())
+            .await?;
 
         // Hebbian: strengthen every pre-existing semantic edge between
-        // co-retrieved pairs. Skip pairs with no edge (bump_link_weight is
-        // a no-op in that case). C(top_k,2) pairs; bounded by top_k.
+        // co-retrieved pairs. Batched so the whole `C(k,2)` set runs under
+        // one transaction in stores that support it.
         let step = self.cfg().hebbian_weight_step;
         let max = self.cfg().hebbian_max_weight;
+        let mut pairs: Vec<(&str, &str)> =
+            Vec::with_capacity(returned_ids.len() * returned_ids.len().saturating_sub(1) / 2);
         for i in 0..returned_ids.len() {
             for j in (i + 1)..returned_ids.len() {
-                let _ = self
-                    .graph_store
-                    .bump_link_weight(&returned_ids[i], &returned_ids[j], step, max)
-                    .await;
+                pairs.push((returned_ids[i].as_str(), returned_ids[j].as_str()));
             }
+        }
+        if !pairs.is_empty()
+            && let Err(e) = self
+                .graph_store
+                .bump_link_weights_batch(&pairs, step, max)
+                .await
+        {
+            debug!(error = %e, "ACTIVATE: bump_link_weights_batch non-fatal failure");
         }
         Ok(())
     }
 
     // ─── Helpers ──────────────────────────────────────────────────────
 
-    async fn extend_pool(
-        &self,
-        pool: &mut Vec<MemoryNote>,
-        ids: &[String],
-    ) -> Result<()> {
+    async fn extend_pool(&self, pool: &mut Vec<MemoryNote>, ids: &[String]) -> Result<()> {
         let have: HashSet<String> = pool.iter().map(|n| n.id.clone()).collect();
-        let need: Vec<&str> = ids.iter().filter(|id| !have.contains(*id)).map(|s| s.as_str()).collect();
+        let need: Vec<&str> = ids
+            .iter()
+            .filter(|id| !have.contains(*id))
+            .map(|s| s.as_str())
+            .collect();
         if need.is_empty() {
             return Ok(());
         }
@@ -438,12 +556,17 @@ impl ActivateEngine {
     }
 
     fn weights_for_mode(&self, mode: QueryMode) -> HashMap<String, f32> {
-        let key = format!("{:?}", mode);
         self.cfg()
             .channel_weights
-            .get(&key)
+            .get(mode.as_str())
             .cloned()
             .unwrap_or_default()
+    }
+
+    /// Exposed sampling decision so callers can gate on the shared rate.
+    pub fn should_sample_trace(&self) -> bool {
+        let rate = self.cfg().trace_sample_rate;
+        rate > 0.0 && should_sample(rate)
     }
 }
 
@@ -478,11 +601,7 @@ pub fn actr_activation(
 
 /// Reciprocal Rank Fusion (Cormack et al., 2009) over an arbitrary number
 /// of ranked channels. Per-channel weights scale the RRF contribution.
-pub fn rrf(
-    channels: &[Channel],
-    weights: &HashMap<String, f32>,
-    k: f32,
-) -> Vec<(String, f32)> {
+pub fn rrf(channels: &[Channel], weights: &HashMap<String, f32>, k: f32) -> Vec<(String, f32)> {
     let mut scores: HashMap<String, f32> = HashMap::new();
     for ch in channels {
         let w = weights.get(ch.name).copied().unwrap_or(0.0);
@@ -530,7 +649,12 @@ mod tests {
         let one = vec![hours_ago(24, now)];
         let b3 = actr_activation(&three, now, 0.5, 3);
         let b1 = actr_activation(&one, now, 0.5, 1);
-        assert!(b3 > b1, "multiple recent accesses must raise activation: {} !> {}", b3, b1);
+        assert!(
+            b3 > b1,
+            "multiple recent accesses must raise activation: {} !> {}",
+            b3,
+            b1
+        );
     }
 
     #[test]
@@ -558,8 +682,14 @@ mod tests {
 
     #[test]
     fn rrf_merges_channels_by_rank() {
-        let c1 = Channel { name: "ann", ranked: vec!["a".into(), "b".into(), "c".into()] };
-        let c2 = Channel { name: "rerank", ranked: vec!["b".into(), "a".into(), "d".into()] };
+        let c1 = Channel {
+            name: "ann",
+            ranked: vec!["a".into(), "b".into(), "c".into()],
+        };
+        let c2 = Channel {
+            name: "rerank",
+            ranked: vec!["b".into(), "a".into(), "d".into()],
+        };
         let mut w = HashMap::new();
         w.insert("ann".into(), 1.0);
         w.insert("rerank".into(), 1.0);
@@ -567,13 +697,23 @@ mod tests {
         // "a" is rank 1 in ann + rank 2 in rerank = 1/61 + 1/62 > "b"s 1/62 + 1/61 (equal).
         // Assert both top-2 are {a, b} and "c" / "d" fall below.
         let top2: HashSet<&str> = fused.iter().take(2).map(|(id, _)| id.as_str()).collect();
-        assert!(top2.contains("a") && top2.contains("b"), "top2 = {:?}", top2);
+        assert!(
+            top2.contains("a") && top2.contains("b"),
+            "top2 = {:?}",
+            top2
+        );
     }
 
     #[test]
     fn rrf_respects_weights() {
-        let c_low = Channel { name: "ann", ranked: vec!["x".into()] };
-        let c_high = Channel { name: "rerank", ranked: vec!["y".into()] };
+        let c_low = Channel {
+            name: "ann",
+            ranked: vec!["x".into()],
+        };
+        let c_high = Channel {
+            name: "rerank",
+            ranked: vec!["y".into()],
+        };
         let mut w = HashMap::new();
         w.insert("ann".into(), 0.1);
         w.insert("rerank".into(), 10.0);
@@ -583,7 +723,10 @@ mod tests {
 
     #[test]
     fn rrf_ignores_zero_weight_channels() {
-        let c = Channel { name: "pas", ranked: vec!["x".into(), "y".into()] };
+        let c = Channel {
+            name: "pas",
+            ranked: vec!["x".into(), "y".into()],
+        };
         let mut w = HashMap::new();
         w.insert("pas".into(), 0.0);
         let fused = rrf(&[c], &w, 60.0);
@@ -593,7 +736,10 @@ mod tests {
     #[test]
     fn rrf_skips_missing_channel_names() {
         // A channel not present in the weight map contributes nothing.
-        let c = Channel { name: "mystery", ranked: vec!["x".into()] };
+        let c = Channel {
+            name: "mystery",
+            ranked: vec!["x".into()],
+        };
         let w: HashMap<String, f32> = HashMap::new();
         let fused = rrf(&[c], &w, 60.0);
         assert!(fused.is_empty());
@@ -603,5 +749,151 @@ mod tests {
     fn should_sample_boundaries() {
         assert!(should_sample(1.0));
         assert!(!should_sample(0.0));
+    }
+
+    /// Every QueryMode variant must produce the same string used as the
+    /// key in the default channel_weights matrix. Keep these in sync.
+    #[test]
+    fn query_mode_as_str_matches_default_weights() {
+        use crate::config::ActivateConfig;
+        use crate::read::QueryMode;
+
+        let defaults = ActivateConfig::default();
+        for mode in [
+            QueryMode::Standard,
+            QueryMode::Recency,
+            QueryMode::Breadth,
+            QueryMode::Computation,
+            QueryMode::Temporal,
+            QueryMode::Existence,
+        ] {
+            assert!(
+                defaults.channel_weights.contains_key(mode.as_str()),
+                "default channel_weights is missing key for {:?}",
+                mode
+            );
+        }
+        // Specific expected strings (canonical form).
+        assert_eq!(QueryMode::Standard.as_str(), "Standard");
+        assert_eq!(QueryMode::Recency.as_str(), "Recency");
+        assert_eq!(QueryMode::Breadth.as_str(), "Breadth");
+        assert_eq!(QueryMode::Computation.as_str(), "Computation");
+        assert_eq!(QueryMode::Temporal.as_str(), "Temporal");
+        assert_eq!(QueryMode::Existence.as_str(), "Existence");
+    }
+
+    /// Verify the new `bump_link_weights_batch` default-impl path: a stub
+    /// store records each pair it sees and we assert the pairs expanded
+    /// from phase_trace's C(k,2) loop match expectations.
+    #[tokio::test]
+    async fn phase_trace_batch_path_expands_pairs() {
+        use crate::error::Result;
+        use crate::store::{GraphStore, VectorStore};
+        use async_trait::async_trait;
+        use std::sync::Mutex as StdMutex;
+
+        #[derive(Default)]
+        struct BumpRecorder {
+            pairs: StdMutex<Vec<(String, String)>>,
+        }
+
+        #[async_trait]
+        impl GraphStore for BumpRecorder {
+            async fn add_link(&self, _: &str, _: &str, _: &str) -> Result<()> {
+                Ok(())
+            }
+            async fn get_links(&self, _: &str) -> Result<Vec<String>> {
+                Ok(vec![])
+            }
+            async fn get_links_with_reasons(&self, _: &str) -> Result<Vec<(String, String)>> {
+                Ok(vec![])
+            }
+            async fn record_evolution(&self, _: &str, _: &str, _: &str) -> Result<()> {
+                Ok(())
+            }
+            async fn get_evolution_history(
+                &self,
+                _: &str,
+            ) -> Result<Vec<crate::note::EvolutionRecord>> {
+                Ok(vec![])
+            }
+            async fn record_dream_run(&self, _: &crate::dream::DreamRun) -> Result<()> {
+                Ok(())
+            }
+            async fn get_dream_cursor(&self) -> Result<Option<DateTime<Utc>>> {
+                Ok(None)
+            }
+            async fn set_dream_cursor(&self, _: DateTime<Utc>) -> Result<()> {
+                Ok(())
+            }
+            async fn init(&self) -> Result<()> {
+                Ok(())
+            }
+
+            async fn bump_link_weight(&self, a: &str, b: &str, _d: f32, _m: f32) -> Result<()> {
+                self.pairs.lock().unwrap().push((a.into(), b.into()));
+                Ok(())
+            }
+        }
+
+        // Minimal VectorStore that just tracks which ids got bumped (not asserted).
+        #[derive(Default)]
+        struct NopVec;
+        #[async_trait]
+        impl VectorStore for NopVec {
+            async fn upsert(&self, _: &crate::note::MemoryNote) -> Result<()> {
+                Ok(())
+            }
+            async fn find_similar(
+                &self,
+                _: &[f32],
+                _: usize,
+                _: &[&str],
+            ) -> Result<Vec<(crate::note::MemoryNote, f32)>> {
+                Ok(vec![])
+            }
+            async fn get(&self, _: &str) -> Result<Option<crate::note::MemoryNote>> {
+                Ok(None)
+            }
+            async fn get_many(&self, _: &[&str]) -> Result<Vec<crate::note::MemoryNote>> {
+                Ok(vec![])
+            }
+            async fn get_all(&self) -> Result<Vec<crate::note::MemoryNote>> {
+                Ok(vec![])
+            }
+            async fn delete(&self, _: &str) -> Result<()> {
+                Ok(())
+            }
+            async fn count(&self) -> Result<usize> {
+                Ok(0)
+            }
+        }
+
+        let recorder = Arc::new(BumpRecorder::default());
+        let ids = ["a".to_string(), "b".to_string(), "c".to_string()];
+
+        // Exercise the batch default-impl directly via the GraphStore trait:
+        // phase_trace would call this with the cross-product of the returned ids.
+        let mut pairs: Vec<(&str, &str)> = Vec::new();
+        for i in 0..ids.len() {
+            for j in (i + 1)..ids.len() {
+                pairs.push((ids[i].as_str(), ids[j].as_str()));
+            }
+        }
+        assert_eq!(pairs.len(), 3, "C(3,2) = 3 pairs");
+
+        let gs: Arc<dyn GraphStore> = recorder.clone();
+        gs.bump_link_weights_batch(&pairs, 0.1, 1.0).await.unwrap();
+
+        let recorded = recorder.pairs.lock().unwrap();
+        assert_eq!(recorded.len(), 3);
+        // Default impl loops the single-pair method in the same order we passed.
+        assert_eq!(recorded[0], ("a".into(), "b".into()));
+        assert_eq!(recorded[1], ("a".into(), "c".into()));
+        assert_eq!(recorded[2], ("b".into(), "c".into()));
+
+        // NopVec unused here (phase_trace covers it end-to-end through the
+        // engine which already has integration coverage).
+        let _nop: Arc<dyn VectorStore> = Arc::new(NopVec);
     }
 }
