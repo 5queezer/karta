@@ -257,7 +257,7 @@ async fn create_karta(scenario_name: &str) -> Karta {
     let _ = std::fs::remove_dir_all(&data_dir);
 
     let vector_store = Arc::new(
-        LanceVectorStore::new(&data_dir).await.unwrap(),
+        LanceVectorStore::new(&format!("{}/lance", data_dir)).await.unwrap(),
     ) as Arc<dyn VectorStore>;
 
     let graph_store = Arc::new(

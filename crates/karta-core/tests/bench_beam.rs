@@ -232,7 +232,7 @@ async fn create_karta_mock(scenario_name: &str) -> Karta {
     let dir = data_dir("beam-mock", scenario_name);
     let _ = std::fs::remove_dir_all(&dir);
 
-    let vector_store = Arc::new(LanceVectorStore::new(&dir).await.unwrap())
+    let vector_store = Arc::new(LanceVectorStore::new(&format!("{}/lance", dir)).await.unwrap())
         as Arc<dyn VectorStore>;
     let graph_store =
         Arc::new(SqliteGraphStore::new(&dir).unwrap()) as Arc<dyn GraphStore>;

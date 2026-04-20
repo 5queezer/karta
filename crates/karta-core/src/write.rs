@@ -1,6 +1,8 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use chrono::Utc;
+use tokio::sync::RwLock;
 use tracing::{debug, info};
 use uuid::Uuid;
 
@@ -17,6 +19,10 @@ pub struct WriteEngine {
     llm: Arc<dyn LlmProvider>,
     config: WriteConfig,
     episode_config: EpisodeConfig,
+    /// Per-session "last note id" map used to emit typed "follows" links
+    /// that stitch consecutive turns together. Needed by the ACTIVATE PAS
+    /// channel so it can walk the sequential chain in either direction.
+    session_last_note: RwLock<HashMap<String, String>>,
 }
 
 impl WriteEngine {
@@ -33,27 +39,81 @@ impl WriteEngine {
             llm,
             config,
             episode_config,
+            session_last_note: RwLock::new(HashMap::new()),
         }
+    }
+
+    /// Look up the previous note id for a session. Hydrates from the vector
+    /// store on first lookup so sequential chains survive process restart.
+    /// Uses the store's `find_latest_by_session` which stores may override
+    /// with an indexed query (Lance default impl is still an O(N) scan).
+    async fn resolve_session_tail(&self, session_id: &str) -> Option<String> {
+        {
+            let g = self.session_last_note.read().await;
+            if let Some(id) = g.get(session_id) {
+                return Some(id.clone());
+            }
+        }
+        let candidate = self
+            .vector_store
+            .find_latest_by_session(session_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|n| n.id);
+        if let Some(ref id) = candidate {
+            let mut g = self.session_last_note.write().await;
+            g.insert(session_id.to_string(), id.clone());
+        }
+        candidate
+    }
+
+    /// Stamp a note with its session id + emit a "follows" edge from the
+    /// previous session tail. Safe to call once after persistence.
+    ///
+    /// The cached session tail is advanced only after the edge write
+    /// succeeds (or when there is no previous tail to link from); a failed
+    /// `add_link_typed` propagates so the caller can retry without
+    /// silently losing the sequential chain.
+    async fn emit_sequential_link(&self, session_id: &str, note: &mut MemoryNote) -> Result<()> {
+        note.session_id = Some(session_id.to_string());
+
+        let prev = self.resolve_session_tail(session_id).await;
+        match prev {
+            Some(prev_id) if prev_id != note.id => {
+                // Single-direction edge prev -> next. Reverse is derived
+                // from turn_delta in get_sequential_neighbors.
+                self.graph_store
+                    .add_link_typed(&prev_id, &note.id, "follows", "sequential", 1.0)
+                    .await?;
+                let mut g = self.session_last_note.write().await;
+                g.insert(session_id.to_string(), note.id.clone());
+            }
+            _ => {
+                // No prior tail (or self-link) — safe to advance the
+                // cache; there's nothing to link from.
+                let mut g = self.session_last_note.write().await;
+                g.insert(session_id.to_string(), note.id.clone());
+            }
+        }
+        Ok(())
     }
 
     pub async fn add_note(&self, content: &str) -> Result<MemoryNote> {
         let preview_end = {
             let max = 60;
             let mut end = content.len().min(max);
-            while end > 0 && !content.is_char_boundary(end) { end -= 1; }
+            while end > 0 && !content.is_char_boundary(end) {
+                end -= 1;
+            }
             end
         };
         info!("Adding note: \"{}...\"", &content[..preview_end]);
 
         // 1. Generate attributes + embed raw content in parallel
         let content_owned = content.to_string();
-        let embed_fut = async {
-            self.llm.embed(&[&content_owned]).await
-        };
-        let (attrs, raw_embeddings) = tokio::join!(
-            self.generate_attributes(content),
-            embed_fut
-        );
+        let embed_fut = async { self.llm.embed(&[&content_owned]).await };
+        let (attrs, raw_embeddings) = tokio::join!(self.generate_attributes(content), embed_fut);
         let attrs = attrs?;
         let raw_embedding = raw_embeddings?.into_iter().next().unwrap_or_default();
         debug!(context = %attrs.context, "Generated attributes");
@@ -71,12 +131,7 @@ impl WriteEngine {
             .await?;
 
         // 4. Compute enriched embedding for storage (content + context + keywords)
-        let embedding_text = format!(
-            "{} {} {}",
-            content,
-            note.context,
-            note.keywords.join(" ")
-        );
+        let embedding_text = format!("{} {} {}", content, note.context, note.keywords.join(" "));
         let enriched_embeddings = self.llm.embed(&[&embedding_text]).await?;
         note.embedding = enriched_embeddings.into_iter().next().unwrap_or_default();
 
@@ -89,7 +144,8 @@ impl WriteEngine {
 
         // 5. LLM decides which candidates to link
         let link_decisions = if !candidates.is_empty() {
-            self.decide_links(content, &note.context, &candidates).await?
+            self.decide_links(content, &note.context, &candidates)
+                .await?
         } else {
             Vec::new()
         };
@@ -101,10 +157,8 @@ impl WriteEngine {
             for decision in &link_decisions {
                 if let Some(existing) = self.vector_store.get(&decision.note_id).await? {
                     // Check evolution count — skip if over threshold (needs consolidation instead)
-                    let evolution_history = self
-                        .graph_store
-                        .get_evolution_history(&existing.id)
-                        .await?;
+                    let evolution_history =
+                        self.graph_store.get_evolution_history(&existing.id).await?;
 
                     if evolution_history.len() >= self.config.max_evolutions_per_note {
                         debug!(
@@ -180,14 +234,18 @@ impl WriteEngine {
 
         // 10. Store atomic facts (each with its own embedding for fine-grained retrieval)
         if !attrs.atomic_facts.is_empty() {
-            let fact_texts: Vec<&str> = attrs.atomic_facts.iter()
+            let fact_texts: Vec<&str> = attrs
+                .atomic_facts
+                .iter()
                 .take(self.config.max_facts_per_note)
                 .map(|f| f.content.as_str())
                 .collect();
 
             match self.llm.embed(&fact_texts).await {
                 Ok(fact_embeddings) => {
-                    for (i, (extraction, embedding)) in attrs.atomic_facts.iter()
+                    for (i, (extraction, embedding)) in attrs
+                        .atomic_facts
+                        .iter()
                         .take(5)
                         .zip(fact_embeddings)
                         .enumerate()
@@ -202,9 +260,10 @@ impl WriteEngine {
                         fact.created_at = note.created_at;
 
                         let _ = self.vector_store.upsert_fact(&fact).await;
-                        let _ = self.graph_store.record_fact(
-                            &fact.id, &note.id, i as u32, fact.subject.as_deref()
-                        ).await;
+                        let _ = self
+                            .graph_store
+                            .record_fact(&fact.id, &note.id, i as u32, fact.subject.as_deref())
+                            .await;
                     }
                     debug!(count = fact_texts.len(), note_id = %note.id, "Stored atomic facts");
                 }
@@ -227,7 +286,12 @@ impl WriteEngine {
         session_id: &str,
     ) -> Result<MemoryNote> {
         // First, add the note normally
-        let note = self.add_note(content).await?;
+        let mut note = self.add_note(content).await?;
+
+        // Stamp session_id + emit the "follows" edge from the previous
+        // session tail so PAS can walk the sequential chain later.
+        self.emit_sequential_link(session_id, &mut note).await?;
+        self.vector_store.upsert(&note).await?;
 
         if !self.episode_config.enabled {
             return Ok(note);
@@ -245,9 +309,7 @@ impl WriteEngine {
         let should_new_episode = match current_episode {
             None => true,
             Some(ep) => {
-                let time_gap = Utc::now()
-                    .signed_duration_since(ep.end_time)
-                    .num_seconds();
+                let time_gap = Utc::now().signed_duration_since(ep.end_time).num_seconds();
 
                 // Hard boundary: time gap exceeds threshold
                 if time_gap > self.episode_config.time_gap_threshold_secs {
@@ -267,12 +329,8 @@ impl WriteEngine {
                     if last_note_content.is_empty() {
                         false
                     } else {
-                        self.detect_episode_boundary(
-                            &last_note_content,
-                            content,
-                            time_gap,
-                        )
-                        .await?
+                        self.detect_episode_boundary(&last_note_content, content, time_gap)
+                            .await?
                     }
                 }
             }
@@ -290,9 +348,7 @@ impl WriteEngine {
             episode.topic_tags = tags;
 
             // Create narrative note
-            let narrative_note = self
-                .create_narrative_note(&narrative, &episode.id)
-                .await?;
+            let narrative_note = self.create_narrative_note(&narrative, &episode.id).await?;
             episode.narrative_note_id = Some(narrative_note.id.clone());
 
             self.graph_store.upsert_episode(&episode).await?;
@@ -308,10 +364,7 @@ impl WriteEngine {
                 .await?;
 
             // Re-synthesize narrative with all notes in the episode
-            let all_note_ids = self
-                .graph_store
-                .get_notes_for_episode(&ep.id)
-                .await?;
+            let all_note_ids = self.graph_store.get_notes_for_episode(&ep.id).await?;
             let all_refs: Vec<&str> = all_note_ids.iter().map(|s| s.as_str()).collect();
             let all_notes = self.vector_store.get_many(&all_refs).await?;
             let contents: Vec<&str> = all_notes.iter().map(|n| n.content.as_str()).collect();
@@ -364,8 +417,7 @@ impl WriteEngine {
         ];
 
         let response = self.llm.chat(&messages, &GenConfig::default()).await?;
-        let parsed: serde_json::Value =
-            serde_json::from_str(&response.content).unwrap_or_default();
+        let parsed: serde_json::Value = serde_json::from_str(&response.content).unwrap_or_default();
 
         // If sameEpisode is false, we need a new episode
         Ok(!parsed["sameEpisode"].as_bool().unwrap_or(true))
@@ -391,8 +443,7 @@ impl WriteEngine {
         ];
 
         let response = self.llm.chat(&messages, &GenConfig::default()).await?;
-        let parsed: serde_json::Value =
-            serde_json::from_str(&response.content).unwrap_or_default();
+        let parsed: serde_json::Value = serde_json::from_str(&response.content).unwrap_or_default();
 
         let narrative = parsed["narrative"]
             .as_str()
@@ -400,17 +451,17 @@ impl WriteEngine {
             .to_string();
         let tags = parsed["topicTags"]
             .as_array()
-            .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default();
 
         Ok((narrative, tags))
     }
 
-    async fn create_narrative_note(
-        &self,
-        narrative: &str,
-        episode_id: &str,
-    ) -> Result<MemoryNote> {
+    async fn create_narrative_note(&self, narrative: &str, episode_id: &str) -> Result<MemoryNote> {
         let embeddings = self.llm.embed(&[narrative]).await?;
         let embedding = embeddings.into_iter().next().unwrap_or_default();
 
@@ -433,6 +484,9 @@ impl WriteEngine {
             last_accessed_at: Utc::now(),
             turn_index: None,
             source_timestamp: None,
+            access_count: 0,
+            access_history: Vec::new(),
+            session_id: None,
         };
 
         self.vector_store.upsert(&note).await?;
@@ -460,21 +514,25 @@ impl WriteEngine {
 
         let response = self.llm.chat(&messages, &config).await?;
 
-        let parsed: serde_json::Value =
-            serde_json::from_str(&response.content).unwrap_or_default();
+        let parsed: serde_json::Value = serde_json::from_str(&response.content).unwrap_or_default();
 
         Ok(NoteAttributes {
-            context: parsed["context"]
-                .as_str()
-                .unwrap_or(content)
-                .to_string(),
+            context: parsed["context"].as_str().unwrap_or(content).to_string(),
             keywords: parsed["keywords"]
                 .as_array()
-                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
                 .unwrap_or_default(),
             tags: parsed["tags"]
                 .as_array()
-                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
                 .unwrap_or_default(),
             foresight_signals: parsed["foresight_signals"]
                 .as_array()
@@ -491,9 +549,7 @@ impl WriteEngine {
                             } else {
                                 Some(crate::note::ForesightExtraction {
                                     content: v["content"].as_str()?.to_string(),
-                                    valid_until: v["valid_until"]
-                                        .as_str()
-                                        .map(String::from),
+                                    valid_until: v["valid_until"].as_str().map(String::from),
                                 })
                             }
                         })
@@ -551,8 +607,7 @@ impl WriteEngine {
 
         let response = self.llm.chat(&messages, &GenConfig::default()).await?;
 
-        let parsed: serde_json::Value =
-            serde_json::from_str(&response.content).unwrap_or_default();
+        let parsed: serde_json::Value = serde_json::from_str(&response.content).unwrap_or_default();
 
         let links = parsed["links"]
             .as_array()
@@ -596,8 +651,7 @@ impl WriteEngine {
 
         let response = self.llm.chat(&messages, &GenConfig::default()).await?;
 
-        let parsed: serde_json::Value =
-            serde_json::from_str(&response.content).unwrap_or_default();
+        let parsed: serde_json::Value = serde_json::from_str(&response.content).unwrap_or_default();
 
         Ok(parsed["updatedContext"]
             .as_str()

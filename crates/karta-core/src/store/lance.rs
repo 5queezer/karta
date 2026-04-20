@@ -1,22 +1,20 @@
 use std::sync::Arc;
 
 use arrow_array::{
-    Float32Array, RecordBatch, RecordBatchIterator, StringArray,
-    RecordBatchReader,
+    Array, Float32Array, RecordBatch, RecordBatchIterator, RecordBatchReader, StringArray,
 };
 use arrow_schema::{DataType, Field, Schema};
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use futures::TryStreamExt;
 use lancedb::{
-    Connection,
-    connect,
+    Connection, Table as LanceTable, connect,
     query::{ExecutableQuery, QueryBase},
-    Table as LanceTable,
 };
 use tokio::sync::RwLock;
 
 use crate::error::{KartaError, Result};
-use crate::note::{MemoryNote, NoteStatus, Provenance};
+use crate::note::{ACCESS_HISTORY_CAP, MemoryNote, NoteStatus, Provenance};
 
 const TABLE_NAME: &str = "notes";
 const FACTS_TABLE_NAME: &str = "atomic_facts";
@@ -65,6 +63,10 @@ impl LanceVectorStore {
             Field::new("last_accessed_at", DataType::Utf8, false),
             Field::new("turn_index", DataType::Utf8, true),
             Field::new("source_timestamp", DataType::Utf8, true),
+            // ACTIVATE: nullable, default-empty on legacy rows.
+            Field::new("access_count", DataType::Utf8, true),
+            Field::new("access_history_json", DataType::Utf8, true),
+            Field::new("session_id", DataType::Utf8, true),
             Field::new(
                 "vector",
                 DataType::FixedSizeList(
@@ -74,6 +76,52 @@ impl LanceVectorStore {
                 false,
             ),
         ]))
+    }
+
+    /// Evolve an existing table to the current ACTIVATE schema by adding
+    /// the nullable access/session columns if missing. Propagates
+    /// `add_columns` failures — subsequent upserts write batches built
+    /// against `Self::schema()` (which includes these columns), so a
+    /// silently failed migration would produce schema mismatches or lost
+    /// writes. Fail loudly at startup instead.
+    async fn migrate_notes_table(table: &LanceTable) -> Result<()> {
+        use lancedb::table::NewColumnTransform;
+
+        let existing = table
+            .schema()
+            .await
+            .map_err(|e| KartaError::VectorStore(e.to_string()))?;
+        let existing_names: std::collections::HashSet<&str> = existing
+            .fields()
+            .iter()
+            .map(|f| f.name().as_str())
+            .collect();
+
+        let mut to_add: Vec<(String, String)> = Vec::new();
+        // SQL CAST ensures the literal matches the column DataType::Utf8.
+        if !existing_names.contains("access_count") {
+            to_add.push(("access_count".into(), "CAST(NULL AS STRING)".into()));
+        }
+        if !existing_names.contains("access_history_json") {
+            to_add.push(("access_history_json".into(), "CAST(NULL AS STRING)".into()));
+        }
+        if !existing_names.contains("session_id") {
+            to_add.push(("session_id".into(), "CAST(NULL AS STRING)".into()));
+        }
+        if to_add.is_empty() {
+            return Ok(());
+        }
+
+        table
+            .add_columns(NewColumnTransform::SqlExpressions(to_add), None)
+            .await
+            .map_err(|e| {
+                KartaError::VectorStore(format!(
+                    "ACTIVATE: failed to migrate notes table schema (access_count / access_history_json / session_id); refusing to continue so writes don't diverge from reader schema: {}",
+                    e
+                ))
+            })?;
+        Ok(())
     }
 
     fn make_reader(
@@ -100,11 +148,16 @@ impl LanceVectorStore {
             .map_err(|e| KartaError::VectorStore(e.to_string()))?;
 
         let table = if names.contains(&TABLE_NAME.to_string()) {
-            self.conn
+            let t = self
+                .conn
                 .open_table(TABLE_NAME)
                 .execute()
                 .await
-                .map_err(|e| KartaError::VectorStore(e.to_string()))?
+                .map_err(|e| KartaError::VectorStore(e.to_string()))?;
+            // Best-effort: add any ACTIVATE columns missing from a pre-existing
+            // table. Failure is non-fatal — reads are schema-tolerant.
+            Self::migrate_notes_table(&t).await?;
+            t
         } else {
             let schema = Self::schema();
             let empty_batch = RecordBatch::new_empty(schema.clone());
@@ -147,17 +200,27 @@ impl LanceVectorStore {
             return Ok(());
         }
 
-        let names = self.conn.table_names().execute().await
+        let names = self
+            .conn
+            .table_names()
+            .execute()
+            .await
             .map_err(|e| KartaError::VectorStore(e.to_string()))?;
 
         let table = if names.contains(&FACTS_TABLE_NAME.to_string()) {
-            self.conn.open_table(FACTS_TABLE_NAME).execute().await
+            self.conn
+                .open_table(FACTS_TABLE_NAME)
+                .execute()
+                .await
                 .map_err(|e| KartaError::VectorStore(e.to_string()))?
         } else {
             let schema = Self::facts_schema();
             let empty_batch = RecordBatch::new_empty(schema.clone());
             let reader = Self::make_reader(vec![empty_batch], schema);
-            self.conn.create_table(FACTS_TABLE_NAME, reader).execute().await
+            self.conn
+                .create_table(FACTS_TABLE_NAME, reader)
+                .execute()
+                .await
                 .map_err(|e| KartaError::VectorStore(e.to_string()))?
         };
 
@@ -177,7 +240,8 @@ impl LanceVectorStore {
             EMBEDDING_DIM as i32,
             Arc::new(Float32Array::from(embedding)),
             None,
-        ).map_err(|e| KartaError::VectorStore(e.to_string()))?;
+        )
+        .map_err(|e| KartaError::VectorStore(e.to_string()))?;
 
         let created_at = fact.created_at.to_rfc3339();
         let ordinal_str = fact.ordinal.to_string();
@@ -194,23 +258,56 @@ impl LanceVectorStore {
                 Arc::new(StringArray::from(vec![created_at.as_str()])),
                 Arc::new(vector_array),
             ],
-        ).map_err(|e| KartaError::VectorStore(e.to_string()))
+        )
+        .map_err(|e| KartaError::VectorStore(e.to_string()))
     }
 
     fn batch_to_facts(batch: &RecordBatch) -> Result<Vec<crate::note::AtomicFact>> {
-        let ids = batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
-        let contents = batch.column(1).as_any().downcast_ref::<StringArray>().unwrap();
-        let source_ids = batch.column(2).as_any().downcast_ref::<StringArray>().unwrap();
-        let ordinals = batch.column(3).as_any().downcast_ref::<StringArray>().unwrap();
-        let subjects = batch.column(4).as_any().downcast_ref::<StringArray>().unwrap();
-        let created_ats = batch.column(5).as_any().downcast_ref::<StringArray>().unwrap();
-        let vector_col = batch.column(6).as_any()
-            .downcast_ref::<arrow_array::FixedSizeListArray>().unwrap();
+        let ids = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let contents = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let source_ids = batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let ordinals = batch
+            .column(3)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let subjects = batch
+            .column(4)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let created_ats = batch
+            .column(5)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let vector_col = batch
+            .column(6)
+            .as_any()
+            .downcast_ref::<arrow_array::FixedSizeListArray>()
+            .unwrap();
 
         let mut facts = Vec::with_capacity(batch.num_rows());
         for i in 0..batch.num_rows() {
-            let embedding = vector_col.value(i).as_any()
-                .downcast_ref::<Float32Array>().unwrap().values().to_vec();
+            let embedding = vector_col
+                .value(i)
+                .as_any()
+                .downcast_ref::<Float32Array>()
+                .unwrap()
+                .values()
+                .to_vec();
             let subject_val = subjects.value(i);
 
             facts.push(crate::note::AtomicFact {
@@ -218,10 +315,15 @@ impl LanceVectorStore {
                 content: contents.value(i).to_string(),
                 source_note_id: source_ids.value(i).to_string(),
                 ordinal: ordinals.value(i).parse().unwrap_or(0),
-                subject: if subject_val.is_empty() { None } else { Some(subject_val.to_string()) },
+                subject: if subject_val.is_empty() {
+                    None
+                } else {
+                    Some(subject_val.to_string())
+                },
                 embedding,
                 created_at: chrono::DateTime::parse_from_rfc3339(created_ats.value(i))
-                    .unwrap_or_default().with_timezone(&chrono::Utc),
+                    .unwrap_or_default()
+                    .with_timezone(&chrono::Utc),
             });
         }
         Ok(facts)
@@ -257,7 +359,19 @@ impl LanceVectorStore {
         let updated_at = note.updated_at.to_rfc3339();
         let last_accessed_at = note.last_accessed_at.to_rfc3339();
         let turn_index_str = note.turn_index.map(|t| t.to_string()).unwrap_or_default();
-        let source_timestamp_str = note.source_timestamp.map(|t| t.to_rfc3339()).unwrap_or_default();
+        let source_timestamp_str = note
+            .source_timestamp
+            .map(|t| t.to_rfc3339())
+            .unwrap_or_default();
+        let access_count_str = note.access_count.to_string();
+        let access_history_json = serde_json::to_string(
+            &note
+                .access_history
+                .iter()
+                .map(|t| t.to_rfc3339())
+                .collect::<Vec<_>>(),
+        )?;
+        let session_id_str = note.session_id.clone().unwrap_or_default();
 
         let batch = RecordBatch::try_new(
             Self::schema(),
@@ -275,6 +389,9 @@ impl LanceVectorStore {
                 Arc::new(StringArray::from(vec![last_accessed_at.as_str()])),
                 Arc::new(StringArray::from(vec![turn_index_str.as_str()])),
                 Arc::new(StringArray::from(vec![source_timestamp_str.as_str()])),
+                Arc::new(StringArray::from(vec![access_count_str.as_str()])),
+                Arc::new(StringArray::from(vec![access_history_json.as_str()])),
+                Arc::new(StringArray::from(vec![session_id_str.as_str()])),
                 Arc::new(vector_array),
             ],
         )
@@ -283,26 +400,86 @@ impl LanceVectorStore {
         Ok(batch)
     }
 
+    /// Look up a nullable string column by name. Returns `default` if the
+    /// column is missing from the batch schema (legacy row) or the cell is null/empty.
+    fn get_str_opt<'a>(batch: &'a RecordBatch, name: &str) -> Vec<Option<&'a str>> {
+        match batch.column_by_name(name) {
+            Some(col) => {
+                let arr = col.as_any().downcast_ref::<StringArray>();
+                match arr {
+                    Some(sa) => (0..batch.num_rows())
+                        .map(|i| {
+                            if sa.is_null(i) {
+                                None
+                            } else {
+                                Some(sa.value(i))
+                            }
+                        })
+                        .collect(),
+                    None => vec![None; batch.num_rows()],
+                }
+            }
+            None => vec![None; batch.num_rows()],
+        }
+    }
+
     fn batch_to_notes(batch: &RecordBatch) -> Result<Vec<MemoryNote>> {
-        let ids = batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
-        let contents = batch.column(1).as_any().downcast_ref::<StringArray>().unwrap();
-        let contexts = batch.column(2).as_any().downcast_ref::<StringArray>().unwrap();
-        let keywords_jsons = batch.column(3).as_any().downcast_ref::<StringArray>().unwrap();
-        let tags_jsons = batch.column(4).as_any().downcast_ref::<StringArray>().unwrap();
-        let provenance_jsons = batch.column(5).as_any().downcast_ref::<StringArray>().unwrap();
-        let confidences = batch.column(6).as_any().downcast_ref::<Float32Array>().unwrap();
-        let created_ats = batch.column(7).as_any().downcast_ref::<StringArray>().unwrap();
-        let updated_ats = batch.column(8).as_any().downcast_ref::<StringArray>().unwrap();
-        let status_jsons = batch.column(9).as_any().downcast_ref::<StringArray>().unwrap();
-        let last_accessed_ats = batch.column(10).as_any().downcast_ref::<StringArray>().unwrap();
-        let turn_index_strs = batch.column(11).as_any().downcast_ref::<StringArray>().unwrap();
-        let source_timestamp_strs = batch.column(12).as_any().downcast_ref::<StringArray>().unwrap();
+        // Column lookup by name keeps us schema-tolerant: legacy tables
+        // missing the ACTIVATE columns simply decode those as defaults.
+        let ids = batch
+            .column_by_name("id")
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+            .ok_or_else(|| KartaError::VectorStore("missing 'id' column".into()))?;
+        let contents = batch
+            .column_by_name("content")
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+            .ok_or_else(|| KartaError::VectorStore("missing 'content' column".into()))?;
+        let contexts = batch
+            .column_by_name("context")
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+            .ok_or_else(|| KartaError::VectorStore("missing 'context' column".into()))?;
+        let keywords_jsons = batch
+            .column_by_name("keywords_json")
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+            .ok_or_else(|| KartaError::VectorStore("missing 'keywords_json' column".into()))?;
+        let tags_jsons = batch
+            .column_by_name("tags_json")
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+            .ok_or_else(|| KartaError::VectorStore("missing 'tags_json' column".into()))?;
+        let provenance_jsons = batch
+            .column_by_name("provenance_json")
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+            .ok_or_else(|| KartaError::VectorStore("missing 'provenance_json' column".into()))?;
+        let confidences = batch
+            .column_by_name("confidence")
+            .and_then(|c| c.as_any().downcast_ref::<Float32Array>())
+            .ok_or_else(|| KartaError::VectorStore("missing 'confidence' column".into()))?;
+        let created_ats = batch
+            .column_by_name("created_at")
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+            .ok_or_else(|| KartaError::VectorStore("missing 'created_at' column".into()))?;
+        let updated_ats = batch
+            .column_by_name("updated_at")
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+            .ok_or_else(|| KartaError::VectorStore("missing 'updated_at' column".into()))?;
+        let status_jsons = batch
+            .column_by_name("status_json")
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+            .ok_or_else(|| KartaError::VectorStore("missing 'status_json' column".into()))?;
+        let last_accessed_ats = batch
+            .column_by_name("last_accessed_at")
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+            .ok_or_else(|| KartaError::VectorStore("missing 'last_accessed_at' column".into()))?;
+        let turn_index_strs = Self::get_str_opt(batch, "turn_index");
+        let source_timestamp_strs = Self::get_str_opt(batch, "source_timestamp");
+        let access_count_strs = Self::get_str_opt(batch, "access_count");
+        let access_history_jsons = Self::get_str_opt(batch, "access_history_json");
+        let session_id_strs = Self::get_str_opt(batch, "session_id");
 
         let vector_col = batch
-            .column(13)
-            .as_any()
-            .downcast_ref::<arrow_array::FixedSizeListArray>()
-            .unwrap();
+            .column_by_name("vector")
+            .and_then(|c| c.as_any().downcast_ref::<arrow_array::FixedSizeListArray>())
+            .ok_or_else(|| KartaError::VectorStore("missing 'vector' column".into()))?;
 
         let mut notes = Vec::with_capacity(batch.num_rows());
 
@@ -317,14 +494,44 @@ impl LanceVectorStore {
 
             let keywords: Vec<String> =
                 serde_json::from_str(keywords_jsons.value(i)).unwrap_or_default();
-            let tags: Vec<String> =
-                serde_json::from_str(tags_jsons.value(i)).unwrap_or_default();
+            let tags: Vec<String> = serde_json::from_str(tags_jsons.value(i)).unwrap_or_default();
             let provenance: Provenance =
-                serde_json::from_str(provenance_jsons.value(i))
-                    .unwrap_or(Provenance::Observed);
+                serde_json::from_str(provenance_jsons.value(i)).unwrap_or(Provenance::Observed);
             let status: NoteStatus =
-                serde_json::from_str(status_jsons.value(i))
-                    .unwrap_or_default();
+                serde_json::from_str(status_jsons.value(i)).unwrap_or_default();
+
+            let access_count: u32 = access_count_strs
+                .get(i)
+                .copied()
+                .flatten()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+
+            let access_history: Vec<DateTime<Utc>> = access_history_jsons
+                .get(i)
+                .copied()
+                .flatten()
+                .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
+                .map(|ss| {
+                    ss.into_iter()
+                        .filter_map(|s| DateTime::parse_from_rfc3339(&s).ok())
+                        .map(|d| d.with_timezone(&Utc))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let access_history = if access_history.len() > ACCESS_HISTORY_CAP {
+                let excess = access_history.len() - ACCESS_HISTORY_CAP;
+                access_history.into_iter().skip(excess).collect()
+            } else {
+                access_history
+            };
+
+            let session_id = session_id_strs
+                .get(i)
+                .copied()
+                .flatten()
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string());
 
             notes.push(MemoryNote {
                 id: ids.value(i).to_string(),
@@ -347,20 +554,22 @@ impl LanceVectorStore {
                 last_accessed_at: chrono::DateTime::parse_from_rfc3339(last_accessed_ats.value(i))
                     .unwrap_or_default()
                     .with_timezone(&chrono::Utc),
-                turn_index: {
-                    let s = turn_index_strs.value(i);
-                    if s.is_empty() { None } else { s.parse().ok() }
-                },
-                source_timestamp: {
-                    let s = source_timestamp_strs.value(i);
-                    if s.is_empty() {
-                        None
-                    } else {
-                        chrono::DateTime::parse_from_rfc3339(s)
-                            .ok()
-                            .map(|d| d.with_timezone(&chrono::Utc))
-                    }
-                },
+                turn_index: turn_index_strs
+                    .get(i)
+                    .copied()
+                    .flatten()
+                    .filter(|s| !s.is_empty())
+                    .and_then(|s| s.parse().ok()),
+                source_timestamp: source_timestamp_strs
+                    .get(i)
+                    .copied()
+                    .flatten()
+                    .filter(|s| !s.is_empty())
+                    .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+                    .map(|d| d.with_timezone(&Utc)),
+                access_count,
+                access_history,
+                session_id,
             });
         }
 
@@ -389,9 +598,7 @@ impl crate::store::VectorStore for LanceVectorStore {
         let table = self.get_table().await?;
 
         // Delete existing row if present (upsert semantics)
-        let _ = table
-            .delete(&format!("id = '{}'", note.id))
-            .await;
+        let _ = table.delete(&format!("id = '{}'", note.id)).await;
 
         let batch = Self::note_to_batch(note)?;
         let schema = Self::schema();
@@ -523,7 +730,10 @@ impl crate::store::VectorStore for LanceVectorStore {
         let batch = Self::fact_to_batch(fact)?;
         let schema = Self::facts_schema();
         let reader = Self::make_reader(vec![batch], schema);
-        table.add(reader).execute().await
+        table
+            .add(reader)
+            .execute()
+            .await
             .map_err(|e| KartaError::VectorStore(e.to_string()))?;
         Ok(())
     }
@@ -535,17 +745,21 @@ impl crate::store::VectorStore for LanceVectorStore {
         exclude_source_note_ids: &[&str],
     ) -> Result<Vec<(crate::note::AtomicFact, f32)>> {
         let table = self.get_facts_table().await?;
-        let query = table.vector_search(embedding)
+        let query = table
+            .vector_search(embedding)
             .map_err(|e| KartaError::VectorStore(e.to_string()))?
             .limit(top_k + exclude_source_note_ids.len() * 5);
-        let results = query.execute().await
+        let results = query
+            .execute()
+            .await
             .map_err(|e| KartaError::VectorStore(e.to_string()))?;
         let batches = Self::collect_batches(results).await?;
 
         let mut scored = Vec::new();
         for batch in &batches {
             let facts = Self::batch_to_facts(batch)?;
-            let distance_col = batch.column_by_name("_distance")
+            let distance_col = batch
+                .column_by_name("_distance")
                 .and_then(|c| c.as_any().downcast_ref::<Float32Array>());
             for (i, fact) in facts.into_iter().enumerate() {
                 if exclude_source_note_ids.contains(&fact.source_note_id.as_str()) {
@@ -562,9 +776,11 @@ impl crate::store::VectorStore for LanceVectorStore {
 
     async fn get_facts_for_note(&self, note_id: &str) -> Result<Vec<crate::note::AtomicFact>> {
         let table = self.get_facts_table().await?;
-        let results = table.query()
+        let results = table
+            .query()
             .only_if(format!("source_note_id = '{}'", note_id))
-            .execute().await
+            .execute()
+            .await
             .map_err(|e| KartaError::VectorStore(e.to_string()))?;
         let batches = Self::collect_batches(results).await?;
         let mut facts = Vec::new();
