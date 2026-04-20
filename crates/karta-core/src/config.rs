@@ -288,17 +288,24 @@ fn default_activate_channel_weights() -> HashMap<String, HashMap<String, f32>> {
             ("profile", 0.4),
         ]),
     );
+    // Existence ("Have I X?" / "Did I ever X?" / contradiction checks):
+    // - hebbian: 0.0 — Hebbian boosts consistent co-activated clusters, which is
+    //   exactly what suppresses contradicting outlier notes in Existence queries.
+    // - facts: 1.3 — the contradicting evidence is typically captured as an
+    //   atomic fact; boost that channel to surface the "I have never X" counter-fact.
+    // - integration: 1.0 — structural graph neighbours (rather than co-activated
+    //   ones) are more likely to connect to contradicting notes.
     m.insert(
         QueryMode::Existence.as_str().into(),
         mk(&[
             ("ann", 1.0),
             ("keyword", 0.8),
-            ("hebbian", 0.5),
+            ("hebbian", 0.0),
             ("actr", 0.5),
-            ("integration", 0.5),
+            ("integration", 1.0),
             ("rerank", 1.2),
             ("pas", 0.0),
-            ("facts", 0.9),
+            ("facts", 1.3),
             ("foresight", 0.5),
             ("profile", 1.0),
         ]),
@@ -588,5 +595,20 @@ mod tests {
         assert_eq!(cfg.anchor_top_k, 10);
         assert!((cfg.facts_min_score - 0.3).abs() < 1e-6);
         assert_eq!(cfg.integration_bfs_cap, 64);
+    }
+
+    /// Existence-mode channel weights were rebalanced to stop Hebbian
+    /// co-activation from suppressing contradicting outlier notes (BEAM Conv 1
+    /// Q4 regression; see PR #3).
+    #[test]
+    fn existence_channel_weights_rebalanced_for_contradictions() {
+        let cfg = ActivateConfig::default();
+        let existence = cfg
+            .channel_weights
+            .get("Existence")
+            .expect("Existence map present");
+        assert_eq!(existence.get("hebbian").copied(), Some(0.0));
+        assert_eq!(existence.get("facts").copied(), Some(1.3));
+        assert_eq!(existence.get("integration").copied(), Some(1.0));
     }
 }
