@@ -1,6 +1,8 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use chrono::Utc;
+use tokio::sync::RwLock;
 use tracing::{debug, info};
 use uuid::Uuid;
 
@@ -17,6 +19,10 @@ pub struct WriteEngine {
     llm: Arc<dyn LlmProvider>,
     config: WriteConfig,
     episode_config: EpisodeConfig,
+    /// Per-session "last note id" map used to emit typed "follows" links
+    /// that stitch consecutive turns together. Needed by the ACTIVATE PAS
+    /// channel so it can walk the sequential chain in either direction.
+    session_last_note: RwLock<HashMap<String, String>>,
 }
 
 impl WriteEngine {
@@ -33,7 +39,59 @@ impl WriteEngine {
             llm,
             config,
             episode_config,
+            session_last_note: RwLock::new(HashMap::new()),
         }
+    }
+
+    /// Look up the previous note id for a session. Hydrates from the vector
+    /// store on first lookup so sequential chains survive process restart.
+    async fn resolve_session_tail(&self, session_id: &str) -> Option<String> {
+        {
+            let g = self.session_last_note.read().await;
+            if let Some(id) = g.get(session_id) {
+                return Some(id.clone());
+            }
+        }
+        // Cold cache: scan for the most recent note with this session_id.
+        let candidate = self
+            .vector_store
+            .get_all()
+            .await
+            .ok()
+            .and_then(|all| {
+                all.into_iter()
+                    .filter(|n| n.session_id.as_deref() == Some(session_id))
+                    .max_by_key(|n| (n.turn_index.unwrap_or(0), n.created_at))
+                    .map(|n| n.id)
+            });
+        if let Some(ref id) = candidate {
+            let mut g = self.session_last_note.write().await;
+            g.insert(session_id.to_string(), id.clone());
+        }
+        candidate
+    }
+
+    /// Stamp a note with its session id + emit a "follows" edge from the
+    /// previous session tail. Safe to call once after persistence.
+    async fn emit_sequential_link(&self, session_id: &str, note: &mut MemoryNote) -> Result<()> {
+        note.session_id = Some(session_id.to_string());
+
+        let prev = self.resolve_session_tail(session_id).await;
+        if let Some(prev_id) = prev {
+            if prev_id != note.id {
+                // Single-direction edge prev -> next. Reverse is derived
+                // from turn_delta in get_sequential_neighbors.
+                let _ = self
+                    .graph_store
+                    .add_link_typed(&prev_id, &note.id, "follows", "sequential", 1.0)
+                    .await;
+            }
+        }
+        {
+            let mut g = self.session_last_note.write().await;
+            g.insert(session_id.to_string(), note.id.clone());
+        }
+        Ok(())
     }
 
     pub async fn add_note(&self, content: &str) -> Result<MemoryNote> {
@@ -227,7 +285,12 @@ impl WriteEngine {
         session_id: &str,
     ) -> Result<MemoryNote> {
         // First, add the note normally
-        let note = self.add_note(content).await?;
+        let mut note = self.add_note(content).await?;
+
+        // Stamp session_id + emit the "follows" edge from the previous
+        // session tail so PAS can walk the sequential chain later.
+        self.emit_sequential_link(session_id, &mut note).await?;
+        self.vector_store.upsert(&note).await?;
 
         if !self.episode_config.enabled {
             return Ok(note);
@@ -433,6 +496,9 @@ impl WriteEngine {
             last_accessed_at: Utc::now(),
             turn_index: None,
             source_timestamp: None,
+            access_count: 0,
+            access_history: Vec::new(),
+            session_id: None,
         };
 
         self.vector_store.upsert(&note).await?;

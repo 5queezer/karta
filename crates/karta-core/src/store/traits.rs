@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 
 use crate::error::Result;
 use crate::note::{AtomicFact, CrossEpisodeDigest, Episode, EpisodeDigest, ForesightSignal, MemoryNote};
@@ -47,6 +48,29 @@ pub trait VectorStore: Send + Sync {
 
     /// Get all facts for a given source note.
     async fn get_facts_for_note(&self, _note_id: &str) -> Result<Vec<AtomicFact>> { Ok(Vec::new()) }
+
+    // --- ACTIVATE: access bookkeeping (Phase 7 — Trace) ---
+
+    /// Record a single access: bump `access_count`, append `at` to
+    /// `access_history` (capped at ACCESS_HISTORY_CAP), update `last_accessed_at`.
+    /// Default impl does a read-modify-write via `get` + `upsert`; stores with
+    /// native atomic update support may override for throughput.
+    async fn bump_access(&self, id: &str, at: DateTime<Utc>) -> Result<()> {
+        if let Some(mut note) = self.get(id).await? {
+            note.record_access(at);
+            self.upsert(&note).await?;
+        }
+        Ok(())
+    }
+
+    /// Batch variant of `bump_access`. Override for a single transaction in
+    /// stores that support it.
+    async fn bump_access_many(&self, ids: &[&str], at: DateTime<Utc>) -> Result<()> {
+        for id in ids {
+            self.bump_access(id, at).await?;
+        }
+        Ok(())
+    }
 }
 
 /// Stores graph edges (links), evolution history, dream state,
@@ -67,6 +91,67 @@ pub trait GraphStore: Send + Sync {
     /// Get the number of links for a note (for graph-aware scoring).
     async fn get_link_count(&self, note_id: &str) -> Result<usize> {
         Ok(self.get_links(note_id).await?.len())
+    }
+
+    // --- ACTIVATE: typed + weighted links (Phases 2, 5b, 7) ---
+
+    /// Add a typed, weighted link. `link_type` is typically "semantic" or
+    /// "follows" (sequential). Direction of "follows" is preserved: it is a
+    /// single-direction edge (prev -> next) whose reverse is derived from
+    /// `turn_delta`.
+    async fn add_link_typed(
+        &self,
+        from_id: &str,
+        to_id: &str,
+        link_type: &str,
+        reason: &str,
+        weight: f32,
+    ) -> Result<()> {
+        let _ = (link_type, weight);
+        self.add_link(from_id, to_id, reason).await
+    }
+
+    /// Return (neighbor_id, weight) for a note. Optionally filter by link_type.
+    async fn get_links_with_weights(
+        &self,
+        note_id: &str,
+        _link_type: Option<&str>,
+    ) -> Result<Vec<(String, f32)>> {
+        Ok(self
+            .get_links(note_id)
+            .await?
+            .into_iter()
+            .map(|id| (id, 1.0_f32))
+            .collect())
+    }
+
+    /// Follow the "follows" chain from `note_id` in both directions up to
+    /// `radius` turns. Returns (neighbor_id, turn_delta) where delta is the
+    /// signed offset (negative = earlier turn, positive = later turn).
+    async fn get_sequential_neighbors(
+        &self,
+        _note_id: &str,
+        _radius: usize,
+    ) -> Result<Vec<(String, i32)>> {
+        Ok(Vec::new())
+    }
+
+    /// Hebbian strengthening: `weight = min(max, weight + delta)` on the
+    /// semantic edge between `from` and `to`. No-op if no edge exists.
+    async fn bump_link_weight(
+        &self,
+        _from_id: &str,
+        _to_id: &str,
+        _delta: f32,
+        _max: f32,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    /// Apply multiplicative decay to every semantic edge: `weight = max(1.0, weight * factor)`.
+    /// Called from `ForgetConfig` sweep. Default is a no-op.
+    async fn decay_link_weights(&self, _factor: f32) -> Result<usize> {
+        Ok(0)
     }
 
     // --- Evolution history ---

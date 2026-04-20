@@ -129,6 +129,10 @@ pub struct ReadConfig {
     pub fact_retrieval_enabled: bool,
     /// Score boost for notes found via fact match.
     pub fact_match_boost: f32,
+    /// ACTIVATE cognitive-retrieval pipeline: ACT-R + Hebbian + PAS + RRF.
+    /// When enabled, supersedes the additive scalar scorer in `search_wide()`.
+    #[serde(default)]
+    pub activate: ActivateConfig,
 }
 
 impl Default for ReadConfig {
@@ -148,6 +152,96 @@ impl Default for ReadConfig {
             episode_drilldown_min_score: 0.25,
             fact_retrieval_enabled: true,
             fact_match_boost: 0.1,
+            activate: ActivateConfig::default(),
+        }
+    }
+}
+
+// ─── ACTIVATE pipeline configuration ────────────────────────────────────────
+
+/// Configuration for the ACTIVATE 6-phase cognitive retrieval pipeline.
+///
+/// Feature-flagged via `enabled`. Also honours the `KARTA_ACTIVATE_ENABLED`
+/// environment variable so benchmarks can toggle without editing TOML.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActivateConfig {
+    /// Master switch. Defaults to `false` so the existing `search_wide()`
+    /// scalar scorer remains the production path until this is validated.
+    pub enabled: bool,
+    /// ACT-R base-level learning decay rate. Default 0.5 (Anderson 2004).
+    pub act_r_decay_d: f64,
+    /// Drop notes below this base-level activation from the ACT-R channel.
+    pub act_r_min_activation: f64,
+    /// Hebbian strengthening: per-retrieval weight increment on co-activated semantic links.
+    pub hebbian_weight_step: f32,
+    /// Upper bound on Hebbian link weight to prevent runaway.
+    pub hebbian_max_weight: f32,
+    /// Co-activation channel: top-K weight-sorted neighbors to pull per anchor.
+    pub hebbian_neighbors_per_anchor: usize,
+    /// Reciprocal Rank Fusion constant. 60 is the canonical Cormack 2009 value.
+    pub rrf_k: f32,
+    /// PAS sequential walk radius (turns in each direction) for Temporal queries.
+    pub pas_window: usize,
+    /// Fraction of queries that run phase_trace writes. 1.0 = every query.
+    pub trace_sample_rate: f32,
+    /// Per-QueryMode channel weight overrides. Key = channel name.
+    /// Channels: "ann", "keyword", "hebbian", "actr", "integration", "rerank",
+    /// "pas", "facts", "foresight", "profile".
+    #[serde(default)]
+    pub channel_weights: HashMap<String, HashMap<String, f32>>,
+}
+
+impl Default for ActivateConfig {
+    fn default() -> Self {
+        // Channel-weight matrix seeded per QueryMode.  QueryMode variants are
+        // stringified via their Debug form so TOML overrides read naturally
+        // (e.g. `[read.activate.channel_weights.Temporal] pas = 2.0`).
+        fn mk(pairs: &[(&str, f32)]) -> HashMap<String, f32> {
+            pairs.iter().map(|(k, v)| (k.to_string(), *v)).collect()
+        }
+        let mut m = HashMap::new();
+        m.insert("Standard".into(), mk(&[
+            ("ann", 1.0), ("keyword", 0.5), ("hebbian", 0.7), ("actr", 0.3),
+            ("integration", 0.5), ("rerank", 1.0), ("pas", 0.0),
+            ("facts", 0.6), ("foresight", 0.4), ("profile", 1.2),
+        ]));
+        m.insert("Recency".into(), mk(&[
+            ("ann", 0.6), ("keyword", 0.4), ("hebbian", 0.3), ("actr", 1.2),
+            ("integration", 0.3), ("rerank", 0.6), ("pas", 0.0),
+            ("facts", 0.4), ("foresight", 0.8), ("profile", 0.8),
+        ]));
+        m.insert("Breadth".into(), mk(&[
+            ("ann", 1.0), ("keyword", 0.5), ("hebbian", 1.0), ("actr", 0.3),
+            ("integration", 0.8), ("rerank", 0.8), ("pas", 0.0),
+            ("facts", 0.5), ("foresight", 0.4), ("profile", 1.0),
+        ]));
+        m.insert("Computation".into(), mk(&[
+            ("ann", 0.8), ("keyword", 0.8), ("hebbian", 0.4), ("actr", 0.3),
+            ("integration", 0.6), ("rerank", 1.2), ("pas", 0.0),
+            ("facts", 1.0), ("foresight", 0.5), ("profile", 0.8),
+        ]));
+        m.insert("Temporal".into(), mk(&[
+            ("ann", 0.3), ("keyword", 0.3), ("hebbian", 0.0), ("actr", 1.0),
+            ("integration", 0.2), ("rerank", 0.0), ("pas", 1.5),
+            ("facts", 0.2), ("foresight", 0.3), ("profile", 0.4),
+        ]));
+        m.insert("Existence".into(), mk(&[
+            ("ann", 1.0), ("keyword", 0.8), ("hebbian", 0.5), ("actr", 0.5),
+            ("integration", 0.5), ("rerank", 1.2), ("pas", 0.0),
+            ("facts", 0.9), ("foresight", 0.5), ("profile", 1.0),
+        ]));
+
+        Self {
+            enabled: false,
+            act_r_decay_d: 0.5,
+            act_r_min_activation: -0.5,
+            hebbian_weight_step: 0.05,
+            hebbian_max_weight: 3.0,
+            hebbian_neighbors_per_anchor: 5,
+            rrf_k: 60.0,
+            pas_window: 6,
+            trace_sample_rate: 1.0,
+            channel_weights: m,
         }
     }
 }
@@ -223,7 +317,18 @@ pub struct ForgetConfig {
     pub archive_threshold: f32,
     /// Whether to run forgetting sweep at the end of each dream pass.
     pub sweep_on_dream: bool,
+    /// ACTIVATE: archive notes whose ACT-R base-level activation drops below
+    /// this floor (and whose age exceeds `decay_half_life_days`).
+    #[serde(default = "default_actr_floor")]
+    pub actr_decay_floor: f32,
+    /// ACTIVATE: multiplicative decay applied to semantic-link weights on
+    /// every sweep. Floored at 1.0 so links never fall below their initial weight.
+    #[serde(default = "default_link_decay")]
+    pub link_weight_decay: f32,
 }
+
+fn default_actr_floor() -> f32 { -1.0 }
+fn default_link_decay() -> f32 { 0.99 }
 
 impl Default for ForgetConfig {
     fn default() -> Self {
@@ -232,6 +337,8 @@ impl Default for ForgetConfig {
             decay_half_life_days: 90.0,
             archive_threshold: 0.1,
             sweep_on_dream: true,
+            actr_decay_floor: default_actr_floor(),
+            link_weight_decay: default_link_decay(),
         }
     }
 }

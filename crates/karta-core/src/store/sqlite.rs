@@ -32,6 +32,71 @@ impl SqliteGraphStore {
     }
 }
 
+impl SqliteGraphStore {
+    /// Idempotent migration for the `links` table: adds `weight` + `link_type`
+    /// columns on pre-ACTIVATE databases and rebuilds the PK to
+    /// `(from_id, to_id, link_type)`. Safe to call on a fresh database.
+    fn migrate_links_table(conn: &Connection) -> Result<()> {
+        let table_exists: bool = conn
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='links'",
+                [],
+                |_| Ok(true),
+            )
+            .unwrap_or(false);
+        if !table_exists {
+            return Ok(());
+        }
+
+        let mut has_link_type = false;
+        let mut has_weight = false;
+        {
+            let mut stmt = conn
+                .prepare("PRAGMA table_info(links)")
+                .map_err(|e| KartaError::GraphStore(e.to_string()))?;
+            let cols = stmt
+                .query_map([], |row| row.get::<_, String>(1))
+                .map_err(|e| KartaError::GraphStore(e.to_string()))?;
+            for col in cols {
+                let name = col.map_err(|e| KartaError::GraphStore(e.to_string()))?;
+                if name == "link_type" { has_link_type = true; }
+                if name == "weight" { has_weight = true; }
+            }
+        }
+
+        if has_link_type && has_weight {
+            return Ok(());
+        }
+
+        // Full rebuild: the original PK is (from_id, to_id); we need it to be
+        // (from_id, to_id, link_type) so semantic + follows can coexist.
+        conn.execute_batch(
+            "
+            BEGIN;
+            CREATE TABLE IF NOT EXISTS links_new (
+                from_id TEXT NOT NULL,
+                to_id TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                weight REAL NOT NULL DEFAULT 1.0,
+                link_type TEXT NOT NULL DEFAULT 'semantic',
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (from_id, to_id, link_type)
+            );
+            INSERT OR IGNORE INTO links_new (from_id, to_id, reason, weight, link_type, created_at)
+              SELECT from_id, to_id, reason, 1.0, 'semantic', created_at FROM links;
+            DROP TABLE links;
+            ALTER TABLE links_new RENAME TO links;
+            CREATE INDEX IF NOT EXISTS idx_links_from ON links(from_id);
+            CREATE INDEX IF NOT EXISTS idx_links_to ON links(to_id);
+            CREATE INDEX IF NOT EXISTS idx_links_type ON links(link_type);
+            COMMIT;
+            ",
+        )
+        .map_err(|e| KartaError::GraphStore(e.to_string()))?;
+        Ok(())
+    }
+}
+
 #[async_trait]
 impl crate::store::GraphStore for SqliteGraphStore {
     async fn init(&self) -> Result<()> {
@@ -42,12 +107,15 @@ impl crate::store::GraphStore for SqliteGraphStore {
                 from_id TEXT NOT NULL,
                 to_id TEXT NOT NULL,
                 reason TEXT NOT NULL,
+                weight REAL NOT NULL DEFAULT 1.0,
+                link_type TEXT NOT NULL DEFAULT 'semantic',
                 created_at TEXT NOT NULL DEFAULT (datetime('now')),
-                PRIMARY KEY (from_id, to_id)
+                PRIMARY KEY (from_id, to_id, link_type)
             );
 
             CREATE INDEX IF NOT EXISTS idx_links_from ON links(from_id);
             CREATE INDEX IF NOT EXISTS idx_links_to ON links(to_id);
+            CREATE INDEX IF NOT EXISTS idx_links_type ON links(link_type);
 
             CREATE TABLE IF NOT EXISTS evolution_history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -171,6 +239,10 @@ impl crate::store::GraphStore for SqliteGraphStore {
             ",
         )
         .map_err(|e| KartaError::GraphStore(e.to_string()))?;
+
+        // Pre-ACTIVATE databases still have the old (from_id, to_id) PK and no
+        // weight/link_type columns. Rebuild the table in place if needed.
+        Self::migrate_links_table(&conn)?;
         Ok(())
     }
 
@@ -178,20 +250,172 @@ impl crate::store::GraphStore for SqliteGraphStore {
         let conn = self.conn.lock().map_err(|e| KartaError::GraphStore(e.to_string()))?;
         let now = Utc::now().to_rfc3339();
 
-        // Bidirectional: insert both directions
+        // Bidirectional semantic link; weight starts at 1.0 and is bumped by Hebbian.
         conn.execute(
-            "INSERT OR IGNORE INTO links (from_id, to_id, reason, created_at) VALUES (?1, ?2, ?3, ?4)",
+            "INSERT OR IGNORE INTO links (from_id, to_id, reason, weight, link_type, created_at) VALUES (?1, ?2, ?3, 1.0, 'semantic', ?4)",
             rusqlite::params![from_id, to_id, reason, now],
         )
         .map_err(|e| KartaError::GraphStore(e.to_string()))?;
 
         conn.execute(
-            "INSERT OR IGNORE INTO links (from_id, to_id, reason, created_at) VALUES (?1, ?2, ?3, ?4)",
+            "INSERT OR IGNORE INTO links (from_id, to_id, reason, weight, link_type, created_at) VALUES (?1, ?2, ?3, 1.0, 'semantic', ?4)",
             rusqlite::params![to_id, from_id, reason, now],
         )
         .map_err(|e| KartaError::GraphStore(e.to_string()))?;
 
         Ok(())
+    }
+
+    async fn add_link_typed(
+        &self,
+        from_id: &str,
+        to_id: &str,
+        link_type: &str,
+        reason: &str,
+        weight: f32,
+    ) -> Result<()> {
+        let conn = self.conn.lock().map_err(|e| KartaError::GraphStore(e.to_string()))?;
+        let now = Utc::now().to_rfc3339();
+
+        // "follows" is single-direction (prev -> next); reverse is derived via turn_delta.
+        // "semantic" is bidirectional.
+        conn.execute(
+            "INSERT OR IGNORE INTO links (from_id, to_id, reason, weight, link_type, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![from_id, to_id, reason, weight, link_type, now],
+        )
+        .map_err(|e| KartaError::GraphStore(e.to_string()))?;
+
+        if link_type == "semantic" {
+            conn.execute(
+                "INSERT OR IGNORE INTO links (from_id, to_id, reason, weight, link_type, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params![to_id, from_id, reason, weight, link_type, now],
+            )
+            .map_err(|e| KartaError::GraphStore(e.to_string()))?;
+        }
+
+        Ok(())
+    }
+
+    async fn get_links_with_weights(
+        &self,
+        note_id: &str,
+        link_type: Option<&str>,
+    ) -> Result<Vec<(String, f32)>> {
+        let conn = self.conn.lock().map_err(|e| KartaError::GraphStore(e.to_string()))?;
+        let rows: Vec<(String, f32)> = if let Some(lt) = link_type {
+            let mut stmt = conn
+                .prepare("SELECT to_id, weight FROM links WHERE from_id = ?1 AND link_type = ?2 ORDER BY weight DESC")
+                .map_err(|e| KartaError::GraphStore(e.to_string()))?;
+            stmt.query_map(rusqlite::params![note_id, lt], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)? as f32))
+            })
+            .map_err(|e| KartaError::GraphStore(e.to_string()))?
+            .collect::<std::result::Result<_, _>>()
+            .map_err(|e| KartaError::GraphStore(e.to_string()))?
+        } else {
+            let mut stmt = conn
+                .prepare("SELECT to_id, weight FROM links WHERE from_id = ?1 ORDER BY weight DESC")
+                .map_err(|e| KartaError::GraphStore(e.to_string()))?;
+            stmt.query_map(rusqlite::params![note_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)? as f32))
+            })
+            .map_err(|e| KartaError::GraphStore(e.to_string()))?
+            .collect::<std::result::Result<_, _>>()
+            .map_err(|e| KartaError::GraphStore(e.to_string()))?
+        };
+        Ok(rows)
+    }
+
+    async fn get_sequential_neighbors(
+        &self,
+        note_id: &str,
+        radius: usize,
+    ) -> Result<Vec<(String, i32)>> {
+        if radius == 0 {
+            return Ok(Vec::new());
+        }
+        let mut neighbors: Vec<(String, i32)> = Vec::new();
+        let mut current = note_id.to_string();
+        // Walk forward via "follows" links (prev -> next).
+        {
+            let conn = self.conn.lock().map_err(|e| KartaError::GraphStore(e.to_string()))?;
+            for step in 1..=radius as i32 {
+                let mut stmt = conn
+                    .prepare("SELECT to_id FROM links WHERE from_id = ?1 AND link_type = 'follows' LIMIT 1")
+                    .map_err(|e| KartaError::GraphStore(e.to_string()))?;
+                let next: Option<String> = stmt
+                    .query_row(rusqlite::params![current], |row| row.get(0))
+                    .ok();
+                match next {
+                    Some(id) => {
+                        neighbors.push((id.clone(), step));
+                        current = id;
+                    }
+                    None => break,
+                }
+            }
+        }
+        // Walk backward: find predecessor (where to_id = current and link_type = 'follows').
+        current = note_id.to_string();
+        {
+            let conn = self.conn.lock().map_err(|e| KartaError::GraphStore(e.to_string()))?;
+            for step in 1..=radius as i32 {
+                let mut stmt = conn
+                    .prepare("SELECT from_id FROM links WHERE to_id = ?1 AND link_type = 'follows' LIMIT 1")
+                    .map_err(|e| KartaError::GraphStore(e.to_string()))?;
+                let prev: Option<String> = stmt
+                    .query_row(rusqlite::params![current], |row| row.get(0))
+                    .ok();
+                match prev {
+                    Some(id) => {
+                        neighbors.push((id.clone(), -step));
+                        current = id;
+                    }
+                    None => break,
+                }
+            }
+        }
+        Ok(neighbors)
+    }
+
+    async fn bump_link_weight(
+        &self,
+        from_id: &str,
+        to_id: &str,
+        delta: f32,
+        max: f32,
+    ) -> Result<()> {
+        let conn = self.conn.lock().map_err(|e| KartaError::GraphStore(e.to_string()))?;
+        // Hebbian strengthening on the semantic edge only; clamp to max.
+        conn.execute(
+            "UPDATE links
+             SET weight = MIN(CAST(?3 AS REAL), weight + CAST(?4 AS REAL))
+             WHERE from_id = ?1 AND to_id = ?2 AND link_type = 'semantic'",
+            rusqlite::params![from_id, to_id, max as f64, delta as f64],
+        )
+        .map_err(|e| KartaError::GraphStore(e.to_string()))?;
+        // Mirror in the reverse direction to preserve bidirectional symmetry.
+        conn.execute(
+            "UPDATE links
+             SET weight = MIN(CAST(?3 AS REAL), weight + CAST(?4 AS REAL))
+             WHERE from_id = ?2 AND to_id = ?1 AND link_type = 'semantic'",
+            rusqlite::params![from_id, to_id, max as f64, delta as f64],
+        )
+        .map_err(|e| KartaError::GraphStore(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn decay_link_weights(&self, factor: f32) -> Result<usize> {
+        let conn = self.conn.lock().map_err(|e| KartaError::GraphStore(e.to_string()))?;
+        // Multiplicative decay floored at 1.0 so nothing ever decays below the
+        // initial semantic-link weight.
+        let n = conn
+            .execute(
+                "UPDATE links SET weight = MAX(1.0, weight * CAST(?1 AS REAL)) WHERE link_type = 'semantic'",
+                rusqlite::params![factor as f64],
+            )
+            .map_err(|e| KartaError::GraphStore(e.to_string()))?;
+        Ok(n)
     }
 
     async fn get_links(&self, note_id: &str) -> Result<Vec<String>> {

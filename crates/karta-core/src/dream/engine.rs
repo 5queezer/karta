@@ -549,6 +549,9 @@ impl DreamEngine {
             last_accessed_at: Utc::now(),
             turn_index: None,
             source_timestamp: None,
+            access_count: 0,
+            access_history: Vec::new(),
+            session_id: None,
         };
 
         self.vector_store.upsert(&note).await?;
@@ -687,6 +690,9 @@ impl DreamEngine {
             last_accessed_at: dream.created_at,
             turn_index: None,
             source_timestamp: None,
+            access_count: 0,
+            access_history: Vec::new(),
+            session_id: None,
         };
 
         self.vector_store.upsert(&note).await?;
@@ -818,6 +824,9 @@ impl DreamEngine {
                 last_accessed_at: Utc::now(),
                 turn_index: None,
                 source_timestamp: None,
+            access_count: 0,
+            access_history: Vec::new(),
+            session_id: None,
             };
 
             digest_note_id = Some(note.id.clone());

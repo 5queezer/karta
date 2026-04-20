@@ -1,11 +1,12 @@
 use std::sync::Arc;
 
 use arrow_array::{
-    Float32Array, RecordBatch, RecordBatchIterator, StringArray,
+    Array, Float32Array, RecordBatch, RecordBatchIterator, StringArray,
     RecordBatchReader,
 };
 use arrow_schema::{DataType, Field, Schema};
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use futures::TryStreamExt;
 use lancedb::{
     Connection,
@@ -14,9 +15,10 @@ use lancedb::{
     Table as LanceTable,
 };
 use tokio::sync::RwLock;
+use tracing::warn;
 
 use crate::error::{KartaError, Result};
-use crate::note::{MemoryNote, NoteStatus, Provenance};
+use crate::note::{MemoryNote, NoteStatus, Provenance, ACCESS_HISTORY_CAP};
 
 const TABLE_NAME: &str = "notes";
 const FACTS_TABLE_NAME: &str = "atomic_facts";
@@ -63,6 +65,10 @@ impl LanceVectorStore {
             Field::new("last_accessed_at", DataType::Utf8, false),
             Field::new("turn_index", DataType::Utf8, true),
             Field::new("source_timestamp", DataType::Utf8, true),
+            // ACTIVATE: nullable, default-empty on legacy rows.
+            Field::new("access_count", DataType::Utf8, true),
+            Field::new("access_history_json", DataType::Utf8, true),
+            Field::new("session_id", DataType::Utf8, true),
             Field::new(
                 "vector",
                 DataType::FixedSizeList(
@@ -72,6 +78,46 @@ impl LanceVectorStore {
                 false,
             ),
         ]))
+    }
+
+    /// Best-effort evolution of an existing table to the current ACTIVATE schema.
+    /// Logs and continues on failure — legacy rows remain readable via
+    /// `column_by_name` fallbacks in `batch_to_notes`.
+    async fn migrate_notes_table(table: &LanceTable) -> Result<()> {
+        use lancedb::table::NewColumnTransform;
+
+        let existing = table
+            .schema()
+            .await
+            .map_err(|e| KartaError::VectorStore(e.to_string()))?;
+        let existing_names: std::collections::HashSet<&str> =
+            existing.fields().iter().map(|f| f.name().as_str()).collect();
+
+        let mut to_add: Vec<(String, String)> = Vec::new();
+        // SQL CAST ensures the literal matches the column DataType::Utf8.
+        if !existing_names.contains("access_count") {
+            to_add.push(("access_count".into(), "CAST(NULL AS STRING)".into()));
+        }
+        if !existing_names.contains("access_history_json") {
+            to_add.push(("access_history_json".into(), "CAST(NULL AS STRING)".into()));
+        }
+        if !existing_names.contains("session_id") {
+            to_add.push(("session_id".into(), "CAST(NULL AS STRING)".into()));
+        }
+        if to_add.is_empty() {
+            return Ok(());
+        }
+
+        if let Err(e) = table
+            .add_columns(NewColumnTransform::SqlExpressions(to_add), None)
+            .await
+        {
+            warn!(
+                error = %e,
+                "ACTIVATE: schema migration failed; legacy rows remain readable via column_by_name fallback"
+            );
+        }
+        Ok(())
     }
 
     fn make_reader(
@@ -98,11 +144,16 @@ impl LanceVectorStore {
             .map_err(|e| KartaError::VectorStore(e.to_string()))?;
 
         let table = if names.contains(&TABLE_NAME.to_string()) {
-            self.conn
+            let t = self
+                .conn
                 .open_table(TABLE_NAME)
                 .execute()
                 .await
-                .map_err(|e| KartaError::VectorStore(e.to_string()))?
+                .map_err(|e| KartaError::VectorStore(e.to_string()))?;
+            // Best-effort: add any ACTIVATE columns missing from a pre-existing
+            // table. Failure is non-fatal — reads are schema-tolerant.
+            Self::migrate_notes_table(&t).await?;
+            t
         } else {
             let schema = Self::schema();
             let empty_batch = RecordBatch::new_empty(schema.clone());
@@ -256,6 +307,11 @@ impl LanceVectorStore {
         let last_accessed_at = note.last_accessed_at.to_rfc3339();
         let turn_index_str = note.turn_index.map(|t| t.to_string()).unwrap_or_default();
         let source_timestamp_str = note.source_timestamp.map(|t| t.to_rfc3339()).unwrap_or_default();
+        let access_count_str = note.access_count.to_string();
+        let access_history_json = serde_json::to_string(
+            &note.access_history.iter().map(|t| t.to_rfc3339()).collect::<Vec<_>>(),
+        )?;
+        let session_id_str = note.session_id.clone().unwrap_or_default();
 
         let batch = RecordBatch::try_new(
             Self::schema(),
@@ -273,6 +329,9 @@ impl LanceVectorStore {
                 Arc::new(StringArray::from(vec![last_accessed_at.as_str()])),
                 Arc::new(StringArray::from(vec![turn_index_str.as_str()])),
                 Arc::new(StringArray::from(vec![source_timestamp_str.as_str()])),
+                Arc::new(StringArray::from(vec![access_count_str.as_str()])),
+                Arc::new(StringArray::from(vec![access_history_json.as_str()])),
+                Arc::new(StringArray::from(vec![session_id_str.as_str()])),
                 Arc::new(vector_array),
             ],
         )
@@ -281,26 +340,69 @@ impl LanceVectorStore {
         Ok(batch)
     }
 
+    /// Look up a nullable string column by name. Returns `default` if the
+    /// column is missing from the batch schema (legacy row) or the cell is null/empty.
+    fn get_str_opt<'a>(batch: &'a RecordBatch, name: &str) -> Vec<Option<&'a str>> {
+        match batch.column_by_name(name) {
+            Some(col) => {
+                let arr = col.as_any().downcast_ref::<StringArray>();
+                match arr {
+                    Some(sa) => (0..batch.num_rows())
+                        .map(|i| if sa.is_null(i) { None } else { Some(sa.value(i)) })
+                        .collect(),
+                    None => vec![None; batch.num_rows()],
+                }
+            }
+            None => vec![None; batch.num_rows()],
+        }
+    }
+
     fn batch_to_notes(batch: &RecordBatch) -> Result<Vec<MemoryNote>> {
-        let ids = batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
-        let contents = batch.column(1).as_any().downcast_ref::<StringArray>().unwrap();
-        let contexts = batch.column(2).as_any().downcast_ref::<StringArray>().unwrap();
-        let keywords_jsons = batch.column(3).as_any().downcast_ref::<StringArray>().unwrap();
-        let tags_jsons = batch.column(4).as_any().downcast_ref::<StringArray>().unwrap();
-        let provenance_jsons = batch.column(5).as_any().downcast_ref::<StringArray>().unwrap();
-        let confidences = batch.column(6).as_any().downcast_ref::<Float32Array>().unwrap();
-        let created_ats = batch.column(7).as_any().downcast_ref::<StringArray>().unwrap();
-        let updated_ats = batch.column(8).as_any().downcast_ref::<StringArray>().unwrap();
-        let status_jsons = batch.column(9).as_any().downcast_ref::<StringArray>().unwrap();
-        let last_accessed_ats = batch.column(10).as_any().downcast_ref::<StringArray>().unwrap();
-        let turn_index_strs = batch.column(11).as_any().downcast_ref::<StringArray>().unwrap();
-        let source_timestamp_strs = batch.column(12).as_any().downcast_ref::<StringArray>().unwrap();
+        // Column lookup by name keeps us schema-tolerant: legacy tables
+        // missing the ACTIVATE columns simply decode those as defaults.
+        let ids = batch.column_by_name("id")
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+            .ok_or_else(|| KartaError::VectorStore("missing 'id' column".into()))?;
+        let contents = batch.column_by_name("content")
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+            .ok_or_else(|| KartaError::VectorStore("missing 'content' column".into()))?;
+        let contexts = batch.column_by_name("context")
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+            .ok_or_else(|| KartaError::VectorStore("missing 'context' column".into()))?;
+        let keywords_jsons = batch.column_by_name("keywords_json")
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+            .ok_or_else(|| KartaError::VectorStore("missing 'keywords_json' column".into()))?;
+        let tags_jsons = batch.column_by_name("tags_json")
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+            .ok_or_else(|| KartaError::VectorStore("missing 'tags_json' column".into()))?;
+        let provenance_jsons = batch.column_by_name("provenance_json")
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+            .ok_or_else(|| KartaError::VectorStore("missing 'provenance_json' column".into()))?;
+        let confidences = batch.column_by_name("confidence")
+            .and_then(|c| c.as_any().downcast_ref::<Float32Array>())
+            .ok_or_else(|| KartaError::VectorStore("missing 'confidence' column".into()))?;
+        let created_ats = batch.column_by_name("created_at")
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+            .ok_or_else(|| KartaError::VectorStore("missing 'created_at' column".into()))?;
+        let updated_ats = batch.column_by_name("updated_at")
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+            .ok_or_else(|| KartaError::VectorStore("missing 'updated_at' column".into()))?;
+        let status_jsons = batch.column_by_name("status_json")
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+            .ok_or_else(|| KartaError::VectorStore("missing 'status_json' column".into()))?;
+        let last_accessed_ats = batch.column_by_name("last_accessed_at")
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+            .ok_or_else(|| KartaError::VectorStore("missing 'last_accessed_at' column".into()))?;
+        let turn_index_strs = Self::get_str_opt(batch, "turn_index");
+        let source_timestamp_strs = Self::get_str_opt(batch, "source_timestamp");
+        let access_count_strs = Self::get_str_opt(batch, "access_count");
+        let access_history_jsons = Self::get_str_opt(batch, "access_history_json");
+        let session_id_strs = Self::get_str_opt(batch, "session_id");
 
         let vector_col = batch
-            .column(13)
-            .as_any()
-            .downcast_ref::<arrow_array::FixedSizeListArray>()
-            .unwrap();
+            .column_by_name("vector")
+            .and_then(|c| c.as_any().downcast_ref::<arrow_array::FixedSizeListArray>())
+            .ok_or_else(|| KartaError::VectorStore("missing 'vector' column".into()))?;
 
         let mut notes = Vec::with_capacity(batch.num_rows());
 
@@ -324,6 +426,31 @@ impl LanceVectorStore {
                 serde_json::from_str(status_jsons.value(i))
                     .unwrap_or_default();
 
+            let access_count: u32 = access_count_strs
+                .get(i).copied().flatten()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+
+            let access_history: Vec<DateTime<Utc>> = access_history_jsons
+                .get(i).copied().flatten()
+                .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
+                .map(|ss| ss.into_iter()
+                    .filter_map(|s| DateTime::parse_from_rfc3339(&s).ok())
+                    .map(|d| d.with_timezone(&Utc))
+                    .collect())
+                .unwrap_or_default();
+            let access_history = if access_history.len() > ACCESS_HISTORY_CAP {
+                let excess = access_history.len() - ACCESS_HISTORY_CAP;
+                access_history.into_iter().skip(excess).collect()
+            } else {
+                access_history
+            };
+
+            let session_id = session_id_strs
+                .get(i).copied().flatten()
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string());
+
             notes.push(MemoryNote {
                 id: ids.value(i).to_string(),
                 content: contents.value(i).to_string(),
@@ -345,20 +472,16 @@ impl LanceVectorStore {
                 last_accessed_at: chrono::DateTime::parse_from_rfc3339(last_accessed_ats.value(i))
                     .unwrap_or_default()
                     .with_timezone(&chrono::Utc),
-                turn_index: {
-                    let s = turn_index_strs.value(i);
-                    if s.is_empty() { None } else { s.parse().ok() }
-                },
-                source_timestamp: {
-                    let s = source_timestamp_strs.value(i);
-                    if s.is_empty() {
-                        None
-                    } else {
-                        chrono::DateTime::parse_from_rfc3339(s)
-                            .ok()
-                            .map(|d| d.with_timezone(&chrono::Utc))
-                    }
-                },
+                turn_index: turn_index_strs.get(i).copied().flatten()
+                    .filter(|s| !s.is_empty())
+                    .and_then(|s| s.parse().ok()),
+                source_timestamp: source_timestamp_strs.get(i).copied().flatten()
+                    .filter(|s| !s.is_empty())
+                    .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+                    .map(|d| d.with_timezone(&Utc)),
+                access_count,
+                access_history,
+                session_id,
             });
         }
 
