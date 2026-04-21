@@ -114,13 +114,6 @@ const PROTOTYPES: &[(QueryMode, &[&str])] = &[
             "Have I been inconsistent about my preferences?",
             "Does my earlier statement conflict with the later one?",
             "Was there a contradiction in what I said?",
-            "Have I integrated Flask-Login in my project?",
-            "Have I actually completed the authentication module?",
-            "Did I ever set up the staging environment?",
-            "Do I still use SQLite or did I switch?",
-            "Have I written unit tests for the API?",
-            "Am I currently using Redis for caching?",
-            "Have I decided on a deployment platform yet?",
         ],
     ),
     (
@@ -264,11 +257,6 @@ fn classify_query_keywords(query: &str) -> QueryMode {
         || q.contains("is it true")
         || q.contains("conflict")
         || q.contains("inconsisten")
-        || q.starts_with("have i ")
-        || q.starts_with("did i ever ")
-        || q.starts_with("do i still ")
-        || q.starts_with("am i actually ")
-        || q.starts_with("have i actually ")
     {
         return QueryMode::Existence;
     }
@@ -1522,25 +1510,6 @@ impl ReadEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// The keyword classifier fallback must route "Have I X?" / "Did I ever X?" /
-    /// "Do I still X?" style questions to Existence so contradiction-aware
-    /// channel weights kick in when the embedding classifier is unavailable.
-    #[test]
-    fn keyword_classifier_routes_have_i_questions_to_existence() {
-        assert_eq!(
-            classify_query_keywords("Have I integrated Flask-Login?"),
-            QueryMode::Existence,
-        );
-        assert_eq!(
-            classify_query_keywords("Did I ever write tests?"),
-            QueryMode::Existence,
-        );
-        assert_eq!(
-            classify_query_keywords("Do I still use SQLite?"),
-            QueryMode::Existence,
-        );
-    }
 
     /// Control: a Standard-style question must not be misclassified as Existence.
     #[test]
