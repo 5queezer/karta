@@ -746,6 +746,121 @@ mod tests {
     }
 
     #[test]
+    fn rrf_hebbian_weight_suppresses_outlier_under_cluster_flood() {
+        // Scenario: 20 "consistent cluster" notes occupy ANN ranks 1..=7 and 9..=21
+        // (outlier inserted at ANN rank 8). The 20 cluster members ALSO appear in
+        // the hebbian channel ranks 1..=20 (because they link to each other).
+        // The outlier appears ONLY in the ANN channel — it has no Hebbian edges
+        // to the cluster. This is the Flask-Login scenario compressed into a
+        // deterministic test.
+
+        let mut ann_ranked: Vec<String> = (1..=7).map(|i| format!("cluster_{}", i)).collect();
+        ann_ranked.push("outlier".to_string()); // ANN rank 8
+        for i in 8..=20 {
+            ann_ranked.push(format!("cluster_{}", i));
+        }
+
+        let hebbian_ranked: Vec<String> = (1..=20).map(|i| format!("cluster_{}", i)).collect();
+
+        let ann_ch = Channel {
+            name: "ann",
+            ranked: ann_ranked,
+        };
+        let hebbian_ch = Channel {
+            name: "hebbian",
+            ranked: hebbian_ranked,
+        };
+
+        // Pre-fix weights (old Existence mode): hebbian = 0.7 (the Standard default
+        // was 0.7, Existence was 0.5 — either value reproduces the suppression).
+        let mut weights_pre = HashMap::new();
+        weights_pre.insert("ann".into(), 1.0);
+        weights_pre.insert("hebbian".into(), 0.7);
+
+        let fused_pre = rrf(&[ann_ch.clone(), hebbian_ch.clone()], &weights_pre, 60.0);
+        let top10_pre: Vec<&str> = fused_pre
+            .iter()
+            .take(10)
+            .map(|(id, _)| id.as_str())
+            .collect();
+
+        assert!(
+            !top10_pre.contains(&"outlier"),
+            "With hebbian weight > 0, the contradicting outlier should be suppressed \
+             out of top-10 by double-voting cluster members. Got top-10: {:?}",
+            top10_pre
+        );
+
+        // Post-fix weights (new Existence mode): hebbian = 0.0
+        let mut weights_post = HashMap::new();
+        weights_post.insert("ann".into(), 1.0);
+        weights_post.insert("hebbian".into(), 0.0);
+
+        let fused_post = rrf(&[ann_ch, hebbian_ch], &weights_post, 60.0);
+        let top10_post: Vec<&str> = fused_post
+            .iter()
+            .take(10)
+            .map(|(id, _)| id.as_str())
+            .collect();
+
+        assert!(
+            top10_post.contains(&"outlier"),
+            "With hebbian weight = 0, the outlier should retain its ANN rank 8 \
+             and appear in top-10. Got top-10: {:?}",
+            top10_post
+        );
+    }
+
+    #[test]
+    fn rrf_hebbian_weight_continuous_between_zero_and_one() {
+        // Same setup as above.
+        let mut ann_ranked: Vec<String> = (1..=7).map(|i| format!("cluster_{}", i)).collect();
+        ann_ranked.push("outlier".to_string());
+        for i in 8..=20 {
+            ann_ranked.push(format!("cluster_{}", i));
+        }
+        let hebbian_ranked: Vec<String> = (1..=20).map(|i| format!("cluster_{}", i)).collect();
+        let ann_ch = Channel {
+            name: "ann",
+            ranked: ann_ranked,
+        };
+        let hebbian_ch = Channel {
+            name: "hebbian",
+            ranked: hebbian_ranked,
+        };
+
+        let outlier_rank = |hebbian_w: f32| -> usize {
+            let mut w = HashMap::new();
+            w.insert("ann".into(), 1.0);
+            w.insert("hebbian".into(), hebbian_w);
+            let fused = rrf(&[ann_ch.clone(), hebbian_ch.clone()], &w, 60.0);
+            fused.iter().position(|(id, _)| id == "outlier").unwrap()
+        };
+
+        let ranks: Vec<usize> = [0.0, 0.25, 0.5, 0.75, 1.0]
+            .iter()
+            .map(|&w| outlier_rank(w))
+            .collect();
+
+        // Outlier rank should monotonically increase (i.e., fall deeper) as hebbian weight grows.
+        for pair in ranks.windows(2) {
+            assert!(
+                pair[1] >= pair[0],
+                "Outlier rank must be monotonically non-decreasing as hebbian weight grows. \
+                 Ranks across [0.0, 0.25, 0.5, 0.75, 1.0]: {:?}",
+                ranks
+            );
+        }
+
+        // And specifically: at hebbian=0 it should be position 7 (0-indexed), at hebbian=1 strictly deeper.
+        assert!(
+            ranks[4] > ranks[0],
+            "Outlier must be strictly deeper at hebbian=1.0 than at hebbian=0.0. Got: {:?}",
+            ranks
+        );
+    }
+
+    #[test]
     fn should_sample_boundaries() {
         assert!(should_sample(1.0));
         assert!(!should_sample(0.0));
