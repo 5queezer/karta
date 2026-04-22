@@ -113,6 +113,13 @@ impl crate::store::GraphStore for SqliteGraphStore {
             .conn
             .lock()
             .map_err(|e| KartaError::GraphStore(e.to_string()))?;
+
+        // Pre-ACTIVATE databases still have the old (from_id, to_id) PK and no
+        // weight/link_type columns. Run the migration FIRST — otherwise the
+        // CREATE INDEX on link_type below fails with "no such column" before
+        // we ever get a chance to add the column. (Production bug 2026-04-22.)
+        Self::migrate_links_table(&conn)?;
+
         conn.execute_batch(
             "
             CREATE TABLE IF NOT EXISTS links (
@@ -252,9 +259,6 @@ impl crate::store::GraphStore for SqliteGraphStore {
         )
         .map_err(|e| KartaError::GraphStore(e.to_string()))?;
 
-        // Pre-ACTIVATE databases still have the old (from_id, to_id) PK and no
-        // weight/link_type columns. Rebuild the table in place if needed.
-        Self::migrate_links_table(&conn)?;
         Ok(())
     }
 
@@ -1329,5 +1333,60 @@ mod tests {
             )
             .unwrap();
         assert_eq!(n, 2);
+    }
+
+    /// Regression test for the production bug on Cloud Run revision -00016
+    /// (2026-04-22): a database with the pre-ACTIVATE `links` schema (no
+    /// `link_type` column) caused `init()` to fail with
+    /// `no such column: link_type` because `CREATE INDEX idx_links_type`
+    /// ran before `migrate_links_table`. Init must succeed and migrate.
+    #[tokio::test]
+    async fn init_succeeds_on_pre_activate_legacy_links_schema() {
+        // No tempfile dev-dep here; mirror the on-disk fixture pattern used
+        // in tests/activate_retrieval_invariants.rs.
+        let suffix = uuid::Uuid::new_v4().to_string();
+        let data_dir = format!("/tmp/karta-pre-activate-{}", &suffix[..8]);
+        let _ = std::fs::remove_dir_all(&data_dir);
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let db_path = format!("{}/karta.db", &data_dir);
+
+        // Simulate a pre-ACTIVATE database: create the old links schema directly.
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE links (
+                     from_id TEXT NOT NULL,
+                     to_id TEXT NOT NULL,
+                     reason TEXT NOT NULL,
+                     created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                     PRIMARY KEY (from_id, to_id)
+                 );
+                 INSERT INTO links (from_id, to_id, reason) VALUES ('a', 'b', 'test-edge');",
+            )
+            .unwrap();
+        }
+
+        // Now run the real init path — this would fail before the fix because
+        // CREATE INDEX on link_type runs before the migration that adds the column.
+        let store = SqliteGraphStore::new(&data_dir).unwrap();
+        crate::store::GraphStore::init(&store).await.expect(
+            "init must succeed on a legacy pre-ACTIVATE schema (production bug 2026-04-22)",
+        );
+
+        // Verify the migration actually ran: link_type column exists, weight defaults to 1.0,
+        // and the existing edge survived with link_type='semantic'.
+        let conn = Connection::open(&db_path).unwrap();
+        let (to_id, link_type, weight): (String, String, f64) = conn
+            .query_row(
+                "SELECT to_id, link_type, weight FROM links WHERE from_id = 'a' LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("legacy edge should survive migration");
+        assert_eq!(to_id, "b");
+        assert_eq!(link_type, "semantic");
+        assert!((weight - 1.0).abs() < 1e-9, "default weight should be 1.0");
+
+        let _ = std::fs::remove_dir_all(&data_dir);
     }
 }
