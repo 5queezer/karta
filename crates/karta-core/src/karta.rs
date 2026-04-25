@@ -247,4 +247,57 @@ impl Karta {
     ) -> Result<crate::llm::ChatResponse> {
         self.llm.chat(messages, config).await
     }
+
+    // --- Health ---
+
+    pub async fn health_check(&self) -> Result<KartaHealth> {
+        let vector_ok = self.vector_store.count().await.is_ok();
+        let graph_meta = self.graph_store.get_schema_meta().await;
+        let graph_ok = graph_meta.is_ok();
+
+        let (schema_version, _applied, pending, warnings) = match graph_meta {
+            Ok(meta) => (
+                meta.schema_version,
+                meta.applied_migrations,
+                meta.pending_migrations,
+                meta.warnings,
+            ),
+            Err(ref e) => (
+                0,
+                vec![],
+                vec![],
+                vec![format!("Graph store schema meta unavailable: {e}")],
+            ),
+        };
+
+        let mut warnings = warnings;
+        if !vector_ok {
+            warnings.push("Vector store health check failed".into());
+        }
+        if !pending.is_empty() {
+            warnings.push(format!(
+                "{} pending migration(s): {}",
+                pending.len(),
+                pending.join(", ")
+            ));
+        }
+
+        Ok(KartaHealth {
+            vector_store_ok: vector_ok,
+            graph_store_ok: graph_ok,
+            schema_version: schema_version.to_string(),
+            pending_migrations: pending,
+            warnings,
+        })
+    }
+}
+
+/// Health status of a Karta instance.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct KartaHealth {
+    pub vector_store_ok: bool,
+    pub graph_store_ok: bool,
+    pub schema_version: String,
+    pub pending_migrations: Vec<String>,
+    pub warnings: Vec<String>,
 }

@@ -145,4 +145,7 @@ pub trait GraphStore: Send + Sync {
 
     /// Initialize tables/schema if needed.
     async fn init(&self) -> Result<()>;
+
+    /// Get current schema metadata (version, applied/pending migrations).
+    async fn get_schema_meta(&self) -> Result<crate::migrate::SchemaMeta>;
 }

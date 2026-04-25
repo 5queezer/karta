@@ -5,6 +5,7 @@ use std::sync::Mutex;
 
 use crate::dream::DreamRun;
 use crate::error::{KartaError, Result};
+use crate::migrate;
 use crate::note::EvolutionRecord;
 
 pub struct SqliteGraphStore {
@@ -172,6 +173,10 @@ impl crate::store::GraphStore for SqliteGraphStore {
             ",
         )
         .map_err(|e| KartaError::GraphStore(e.to_string()))?;
+
+        // Initialize schema_meta table and apply pending migrations
+        migrate::init_and_migrate(&conn)?;
+
         Ok(())
     }
 
@@ -787,5 +792,10 @@ impl crate::store::GraphStore for SqliteGraphStore {
         let ids = stmt.query_map(rusqlite::params![entity], |row| row.get(0))
             .map_err(|e| KartaError::GraphStore(e.to_string()))?;
         Ok(ids.filter_map(|r| r.ok()).collect())
+    }
+
+    async fn get_schema_meta(&self) -> Result<crate::migrate::SchemaMeta> {
+        let conn = self.conn.lock().map_err(|e| KartaError::GraphStore(e.to_string()))?;
+        migrate::load_schema_meta(&conn)
     }
 }
