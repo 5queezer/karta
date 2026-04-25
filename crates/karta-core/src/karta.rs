@@ -5,6 +5,7 @@ use chrono::{DateTime, Utc};
 use crate::config::KartaConfig;
 use crate::dream::{DreamEngine, DreamRun};
 use crate::error::{KartaError, Result};
+use crate::forget::{ForgetEngine, ForgetPreview, ForgetRun};
 use crate::llm::LlmProvider;
 use crate::note::{MemoryNote, SearchResult};
 use crate::read::ReadEngine;
@@ -218,6 +219,26 @@ impl Karta {
             self.config.dream.clone(),
         );
         engine.run(scope_type, scope_id).await
+    }
+
+    // --- Forgetting ---
+
+    pub async fn run_forgetting(&self) -> Result<ForgetRun> {
+        let engine = ForgetEngine::new(
+            Arc::clone(&self.vector_store),
+            Arc::clone(&self.graph_store),
+            self.config.forget.clone(),
+        );
+        engine.run_forgetting().await
+    }
+
+    pub async fn preview_forgetting(&self) -> Result<ForgetPreview> {
+        let engine = ForgetEngine::new(
+            Arc::clone(&self.vector_store),
+            Arc::clone(&self.graph_store),
+            self.config.forget.clone(),
+        );
+        engine.preview_forgetting().await
     }
 
     // --- Inspection ---
