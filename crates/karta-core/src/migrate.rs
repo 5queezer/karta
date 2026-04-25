@@ -5,7 +5,7 @@ use rusqlite::Connection;
 use crate::error::{KartaError, Result};
 
 /// Current schema version. Increment this when adding new migrations.
-pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 
 /// Tracks the current schema state of a Karta data directory.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -36,7 +36,29 @@ pub struct Migration {
 
 /// Returns all migrations in order. Add new migrations here.
 pub fn all_migrations() -> Vec<Migration> {
-    vec![]
+    vec![
+        Migration {
+            id: "002_contradictions_table",
+            description: "Create contradictions table for first-class contradiction tracking",
+            up_sql: "CREATE TABLE IF NOT EXISTS contradictions (
+                id TEXT PRIMARY KEY,
+                entity TEXT NOT NULL,
+                scope_id TEXT NOT NULL,
+                source_note_ids_json TEXT NOT NULL,
+                description TEXT NOT NULL,
+                dream_run_id TEXT,
+                status TEXT NOT NULL DEFAULT 'open',
+                resolution_json TEXT,
+                resolved_at TEXT,
+                resolved_by TEXT,
+                ignore_reason TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_contradictions_entity ON contradictions(entity);
+            CREATE INDEX IF NOT EXISTS idx_contradictions_scope ON contradictions(scope_id);
+            CREATE INDEX IF NOT EXISTS idx_contradictions_status ON contradictions(status);",
+        },
+    ]
 }
 
 /// Load the current schema meta from the database.
