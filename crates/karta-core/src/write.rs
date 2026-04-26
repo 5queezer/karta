@@ -183,7 +183,7 @@ impl WriteEngine {
                     for (i, (extraction, embedding)) in attrs
                         .atomic_facts
                         .iter()
-                        .take(5)
+                        .take(fact_texts.len())
                         .zip(fact_embeddings)
                         .enumerate()
                     {

@@ -10,4 +10,4 @@ pub mod store;
 pub mod write;
 
 mod karta;
-pub use karta::Karta;
+pub use karta::{Karta, KartaHealth};

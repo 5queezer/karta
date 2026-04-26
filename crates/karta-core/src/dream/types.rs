@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::str::FromStr;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -41,11 +42,22 @@ impl DreamType {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ParseDreamTypeError;
+
+impl fmt::Display for ParseDreamTypeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "invalid dream type")
+    }
+}
+
+impl std::error::Error for ParseDreamTypeError {}
+
 impl FromStr for DreamType {
-    type Err = ();
+    type Err = ParseDreamTypeError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Self::parse_kind(s).ok_or(())
+        Self::parse_kind(s).ok_or(ParseDreamTypeError)
     }
 }
 

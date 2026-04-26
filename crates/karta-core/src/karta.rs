@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 
 use crate::config::KartaConfig;
 use crate::dream::{DreamEngine, DreamRun};
-use crate::error::{KartaError, Result};
+use crate::error::Result;
 use crate::llm::LlmProvider;
 use crate::note::{MemoryNote, SearchResult};
 use crate::read::ReadEngine;
@@ -91,6 +91,7 @@ impl Karta {
     /// per-operation via `config.llm.overrides`.
     #[cfg(all(feature = "lance", feature = "sqlite", feature = "openai"))]
     pub async fn with_defaults(config: KartaConfig) -> Result<Self> {
+        use crate::error::KartaError;
         use crate::llm::OpenAiProvider;
         use crate::store::lance::LanceVectorStore;
         use crate::store::sqlite::SqliteGraphStore;
@@ -249,22 +250,18 @@ impl Karta {
         let graph_meta = self.graph_store.get_schema_meta().await;
         let graph_ok = graph_meta.is_ok();
 
-        let (schema_version, _applied, pending, warnings) = match graph_meta {
+        let (schema_version, pending, mut warnings) = match graph_meta {
             Ok(meta) => (
-                meta.schema_version,
-                meta.applied_migrations,
+                Some(meta.schema_version.to_string()),
                 meta.pending_migrations,
                 meta.warnings,
             ),
             Err(ref e) => (
-                0,
-                vec![],
+                None,
                 vec![],
                 vec![format!("Graph store schema meta unavailable: {e}")],
             ),
         };
-
-        let mut warnings = warnings;
         if !vector_ok {
             warnings.push("Vector store health check failed".into());
         }
@@ -279,7 +276,7 @@ impl Karta {
         Ok(KartaHealth {
             vector_store_ok: vector_ok,
             graph_store_ok: graph_ok,
-            schema_version: schema_version.to_string(),
+            schema_version,
             pending_migrations: pending,
             warnings,
         })
@@ -291,7 +288,7 @@ impl Karta {
 pub struct KartaHealth {
     pub vector_store_ok: bool,
     pub graph_store_ok: bool,
-    pub schema_version: String,
+    pub schema_version: Option<String>,
     pub pending_migrations: Vec<String>,
     pub warnings: Vec<String>,
 }

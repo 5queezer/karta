@@ -654,6 +654,7 @@ impl ReadEngine {
             if *score < 0.3 {
                 continue;
             }
+            // seen_note_ids.insert intentionally runs before self.vector_store.get and parent.is_active to preserve prior no-retry behavior.
             if seen_note_ids.insert(fact.source_note_id.clone())
                 && let Ok(Some(parent)) = self.vector_store.get(&fact.source_note_id).await
                 && parent.is_active()
@@ -685,6 +686,7 @@ impl ReadEngine {
                     if let Ok(Some(digest)) =
                         self.graph_store.get_episode_digest(linked_ep_id).await
                         && let Some(ref note_id) = digest.digest_note_id
+                        // seen_note_ids.insert intentionally runs before self.vector_store.get and digest_note.is_active to preserve prior no-retry behavior.
                         && seen_note_ids.insert(note_id.clone())
                         && let Ok(Some(digest_note)) = self.vector_store.get(note_id).await
                         && digest_note.is_active()
@@ -771,6 +773,7 @@ impl ReadEngine {
 
                 if matched
                     && let Some(ref note_id) = digest.digest_note_id
+                    // seen_note_ids.insert intentionally runs before self.vector_store.get and digest_note.is_active to preserve prior no-retry behavior.
                     && seen_note_ids.insert(note_id.clone())
                     && let Ok(Some(digest_note)) = self.vector_store.get(note_id).await
                     && digest_note.is_active()

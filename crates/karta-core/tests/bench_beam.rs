@@ -165,9 +165,9 @@ fn normalize_for_matching(s: &str) -> String {
                 '\u{2010}', '\u{2011}', '\u{2012}', '\u{2013}', '\u{2014}', '\u{2015}',
             ],
             "-",
-        ) // horizontal bar
-        .replace(['\u{2018}', '\u{2019}'], "'") // right single quote
-        .replace(['\u{201C}', '\u{201D}'], "\"") // right double quote
+        ) // dash and hyphen-like characters
+        .replace(['\u{2018}', '\u{2019}'], "'") // left and right single quotes
+        .replace(['\u{201C}', '\u{201D}'], "\"") // left and right double quotes
 }
 
 /// Check if `answer` contains at least one alternative from a `|`-separated pattern.
@@ -216,11 +216,15 @@ async fn ingest_sessions(karta: &Karta, sessions: &[Session]) -> usize {
 }
 
 fn data_dir(prefix: &str, scenario_name: &str) -> String {
-    format!(
-        "/tmp/karta-{}-{}",
+    let dir_name = format!(
+        "karta-{}-{}",
         prefix,
         scenario_name.replace([' ', '/'], "-").to_lowercase()
-    )
+    );
+    std::env::temp_dir()
+        .join(dir_name)
+        .to_string_lossy()
+        .into_owned()
 }
 
 async fn create_karta_mock(scenario_name: &str) -> Karta {

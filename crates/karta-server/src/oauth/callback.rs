@@ -4,6 +4,7 @@ use oauth2::TokenResponse as _; // for access_token() on GitHub response
 use oauth2::{AuthorizationCode, PkceCodeVerifier};
 use openidconnect::TokenResponse as _; // for id_token() on Google response
 use serde::Deserialize;
+use url::Url;
 
 use crate::db::AuthCode;
 use crate::error::{Result, ServerError};
@@ -41,10 +42,10 @@ pub async fn google_callback(
         .as_deref()
         .ok_or_else(|| ServerError::BadRequest("Missing state parameter".to_string()))?;
 
-    // Look up pending auth request by IdP CSRF token
+    // Validate provider before consuming the pending auth request.
     let pending = state
         .db
-        .consume_pending_auth(idp_state)?
+        .get_pending_auth(idp_state)?
         .ok_or_else(|| ServerError::BadRequest("Unknown or expired state".to_string()))?;
 
     if pending.provider != "google" {
@@ -52,6 +53,11 @@ pub async fn google_callback(
             "State does not match Google provider".to_string(),
         ));
     }
+
+    let pending = state
+        .db
+        .consume_pending_auth(idp_state)?
+        .ok_or_else(|| ServerError::BadRequest("Unknown or expired state".to_string()))?;
 
     // Check expiry
     let expires = chrono::NaiveDateTime::parse_from_str(&pending.expires_at, "%Y-%m-%dT%H:%M:%SZ")
@@ -143,10 +149,10 @@ pub async fn github_callback(
         .as_deref()
         .ok_or_else(|| ServerError::BadRequest("Missing state parameter".to_string()))?;
 
-    // Look up pending auth request
+    // Validate provider before consuming the pending auth request.
     let pending = state
         .db
-        .consume_pending_auth(idp_state)?
+        .get_pending_auth(idp_state)?
         .ok_or_else(|| ServerError::BadRequest("Unknown or expired state".to_string()))?;
 
     if pending.provider != "github" {
@@ -154,6 +160,11 @@ pub async fn github_callback(
             "State does not match GitHub provider".to_string(),
         ));
     }
+
+    let pending = state
+        .db
+        .consume_pending_auth(idp_state)?
+        .ok_or_else(|| ServerError::BadRequest("Unknown or expired state".to_string()))?;
 
     // Check expiry
     let expires = chrono::NaiveDateTime::parse_from_str(&pending.expires_at, "%Y-%m-%dT%H:%M:%SZ")
@@ -259,8 +270,16 @@ fn generate_auth_code(
 }
 
 fn build_client_redirect(redirect_uri: &str, code: &str, state: &str) -> String {
+    if let Ok(mut url) = Url::parse(redirect_uri) {
+        url.query_pairs_mut()
+            .append_pair("code", code)
+            .append_pair("state", state);
+        return url.to_string();
+    }
+
+    let separator = if redirect_uri.contains('?') { "&" } else { "?" };
     format!(
-        "{redirect_uri}?code={}&state={}",
+        "{redirect_uri}{separator}code={}&state={}",
         urlencoding::encode(code),
         urlencoding::encode(state),
     )

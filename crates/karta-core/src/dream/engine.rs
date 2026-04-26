@@ -107,7 +107,7 @@ impl DreamEngine {
             .config
             .enabled_types
             .iter()
-            .filter_map(|s| DreamType::parse_kind(s))
+            .filter_map(|s| s.parse::<DreamType>().ok())
             .collect();
 
         // Per-cluster dreams (with dedup)
@@ -178,24 +178,49 @@ impl DreamEngine {
             debug!(count = undigested.len(), "Undigested episodes found");
 
             for episode_id in &undigested {
-                if let Ok(Some(episode)) = self.graph_store.get_episode(episode_id).await
-                    && !episode.note_ids.is_empty()
-                {
-                    let note_refs: Vec<&str> =
-                        episode.note_ids.iter().map(|s| s.as_str()).collect();
-                    if let Ok(ep_notes) = self.vector_store.get_many(&note_refs).await {
-                        match self.dream_episode_digest(&episode, &ep_notes).await {
-                            Ok((dream, tokens)) => {
-                                total_tokens += tokens;
-                                if dream.would_write {
-                                    let _ = self.persist_dream(&dream).await;
+                match self.graph_store.get_episode(episode_id).await {
+                    Ok(Some(episode)) if episode.note_ids.is_empty() => {
+                        let digest = crate::note::EpisodeDigest {
+                            id: Uuid::new_v4().to_string(),
+                            episode_id: episode.id.clone(),
+                            entities: Vec::new(),
+                            date_range: None,
+                            aggregations: Vec::new(),
+                            topic_sequence: Vec::new(),
+                            digest_text: String::new(),
+                            digest_note_id: None,
+                            events: Vec::new(),
+                            created_at: Utc::now(),
+                        };
+                        self.graph_store.upsert_episode_digest(&digest).await?;
+                        debug!(episode_id = %episode_id, "Marked empty episode as digested");
+                    }
+                    Ok(Some(episode)) => {
+                        let note_refs: Vec<&str> =
+                            episode.note_ids.iter().map(|s| s.as_str()).collect();
+                        match self.vector_store.get_many(&note_refs).await {
+                            Ok(ep_notes) => {
+                                match self.dream_episode_digest(&episode, &ep_notes).await {
+                                    Ok((dream, tokens)) => {
+                                        total_tokens += tokens;
+                                        if dream.would_write {
+                                            let _ = self.persist_dream(&dream).await;
+                                        }
+                                        dreams.push(dream);
+                                    }
+                                    Err(e) => {
+                                        debug!(episode_id = %episode_id, error = %e, "Episode digest failed")
+                                    }
                                 }
-                                dreams.push(dream);
                             }
                             Err(e) => {
-                                debug!(episode_id = %episode_id, error = %e, "Episode digest failed")
+                                debug!(episode_id = %episode_id, error = %e, "Failed to fetch notes for episode digest")
                             }
                         }
+                    }
+                    Ok(None) => debug!(episode_id = %episode_id, "Undigested episode id not found"),
+                    Err(e) => {
+                        debug!(episode_id = %episode_id, error = %e, "Failed to load episode for digest")
                     }
                 }
             }

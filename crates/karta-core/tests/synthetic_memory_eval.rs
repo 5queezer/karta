@@ -41,6 +41,7 @@ async fn test_temporal_sequence_ordering() {
 // ─── Synthetic Dataset: Forgetting Decay ──────────────────────────────────
 
 #[tokio::test]
+#[ignore = "spec stub until production ForgetConfig decay scoring API is exposed"]
 async fn test_forgetting_decay_scoring() {
     use chrono::{Duration, Utc};
 
@@ -53,6 +54,7 @@ async fn test_forgetting_decay_scoring() {
     let mut recent_note = MemoryNote::new("Recent memory".into());
     recent_note.last_accessed_at = Utc::now() - Duration::days(1);
 
+    // TODO: replace this specification stub with the production ForgetConfig scoring API.
     // Compute decay scores manually: score = 0.5^(elapsed / half_life)
     let old_score = 0.5_f64.powf(90.0 / decay_half_life_days); // 0.5^3 = 0.125
     let recent_score = 0.5_f64.powf(1.0 / decay_half_life_days); // ~0.977
@@ -80,6 +82,8 @@ async fn test_forgetting_decay_scoring() {
 #[tokio::test]
 async fn test_forgetting_protected_notes() {
     let mut profile_note = MemoryNote::new("Profile: John is a developer".into());
+    assert!(!profile_note.is_profile());
+
     profile_note.provenance = Provenance::Profile {
         entity_id: "john".into(),
     };
@@ -103,18 +107,6 @@ async fn test_schema_meta_structure() {
 }
 
 // ─── Synthetic Dataset: Entity Profile ────────────────────────────────────
-
-#[tokio::test]
-async fn test_entity_profile_detection() {
-    let profile_note = MemoryNote::new("Profile: John is a developer".into());
-    assert!(!profile_note.is_profile());
-
-    let mut real_profile = MemoryNote::new("Profile: John is a developer".into());
-    real_profile.provenance = Provenance::Profile {
-        entity_id: "john".into(),
-    };
-    assert!(real_profile.is_profile());
-}
 
 // ─── Synthetic Dataset: Contradiction Resolution ──────────────────────────
 

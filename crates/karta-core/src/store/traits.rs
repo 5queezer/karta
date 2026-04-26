@@ -222,5 +222,12 @@ pub trait GraphStore: Send + Sync {
     async fn init(&self) -> Result<()>;
 
     /// Get current schema metadata (version, applied/pending migrations).
-    async fn get_schema_meta(&self) -> Result<crate::migrate::SchemaMeta>;
+    async fn get_schema_meta(&self) -> Result<crate::migrate::SchemaMeta> {
+        Ok(crate::migrate::SchemaMeta::new(
+            0,
+            Vec::new(),
+            Vec::new(),
+            vec!["Migration tracking unavailable for this graph store".to_string()],
+        ))
+    }
 }
