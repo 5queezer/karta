@@ -81,12 +81,12 @@ pub struct RuleContext {
 }
 
 /// Result of rule evaluation.
-#[derive(Debug, Clone, Serialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct RuleEvaluation {
     pub fired_rules: Vec<FiredRule>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FiredRule {
     pub rule_id: String,
     pub rule_name: String,

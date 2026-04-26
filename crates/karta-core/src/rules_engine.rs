@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use tracing::warn;
 
 use crate::error::Result;
 use crate::rules::{FiredRule, ProceduralRule, RuleCondition, RuleContext, RuleEvaluation};
@@ -32,7 +33,9 @@ impl RuleEngine {
                     rule_name: rule.name.clone(),
                     actions: rule.actions.clone(),
                 });
-                let _ = self.graph_store.increment_rule_fire_count(&rule.id).await;
+                if let Err(e) = self.graph_store.increment_rule_fire_count(&rule.id).await {
+                    warn!(rule_id = %rule.id, error = %e, "failed to increment rule fire_count");
+                }
             }
         }
 
@@ -72,12 +75,12 @@ impl RuleEngine {
 }
 
 /// Trace output showing which rules fired during a query.
-#[derive(Debug, Clone, Serialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct RuleTrace {
     pub fired_rules: Vec<FiredRuleTrace>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FiredRuleTrace {
     pub rule_id: String,
     pub rule_name: String,

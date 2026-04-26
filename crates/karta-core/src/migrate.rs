@@ -173,7 +173,7 @@ fn apply_migrations_with(conn: &Connection, migrations: &[Migration]) -> Result<
                  schema_version = ?1,
                  applied_migrations_json = ?2,
                  last_migration_at = ?3",
-            rusqlite::params![CURRENT_SCHEMA_VERSION, applied_json, now],
+            rusqlite::params![meta.schema_version, applied_json, now],
         ) {
             let _ = tx.rollback();
             return Err(KartaError::GraphStore(format!(
@@ -190,6 +190,7 @@ fn apply_migrations_with(conn: &Connection, migrations: &[Migration]) -> Result<
         }
     }
 
+    persist_schema_meta(conn, CURRENT_SCHEMA_VERSION, &applied)?;
     load_schema_meta_with_migrations(conn, migrations)
 }
 
@@ -217,8 +218,8 @@ pub fn init_and_migrate(conn: &Connection) -> Result<SchemaMeta> {
             schema_version,
             applied_migrations_json,
             last_migration_at
-        ) VALUES (1, ?1, '[]', ?2)",
-        rusqlite::params![CURRENT_SCHEMA_VERSION, Utc::now().to_rfc3339()],
+        ) VALUES (1, 0, '[]', ?1)",
+        rusqlite::params![Utc::now().to_rfc3339()],
     )
     .map_err(|e| KartaError::GraphStore(e.to_string()))?;
 
