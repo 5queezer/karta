@@ -42,7 +42,12 @@ pub struct ProceduralRule {
 }
 
 impl ProceduralRule {
-    pub fn new(name: String, description: String, condition: RuleCondition, actions: Vec<RuleAction>) -> Self {
+    pub fn new(
+        name: String,
+        description: String,
+        condition: RuleCondition,
+        actions: Vec<RuleAction>,
+    ) -> Self {
         let now = Utc::now();
         Self {
             id: uuid::Uuid::new_v4().to_string(),

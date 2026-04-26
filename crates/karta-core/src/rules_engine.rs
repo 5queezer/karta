@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use chrono::Utc;
 use serde::Serialize;
 
 use crate::error::Result;
@@ -56,7 +55,9 @@ impl RuleEngine {
         match condition {
             RuleCondition::QueryContains { keywords } => {
                 let query_lower = ctx.query.to_lowercase();
-                keywords.iter().any(|k| query_lower.contains(&k.to_lowercase()))
+                keywords
+                    .iter()
+                    .any(|k| query_lower.contains(&k.to_lowercase()))
             }
             RuleCondition::SessionMatches { session_id } => {
                 ctx.session_id.as_ref().is_some_and(|s| s == session_id)
@@ -64,9 +65,7 @@ impl RuleEngine {
             RuleCondition::ContradictionForEntity { entity } => {
                 ctx.contradiction_entities.contains(entity)
             }
-            RuleCondition::RetrievedTagPresent { tag } => {
-                ctx.retrieved_tags.contains(tag)
-            }
+            RuleCondition::RetrievedTagPresent { tag } => ctx.retrieved_tags.contains(tag),
             RuleCondition::Always => true,
         }
     }
