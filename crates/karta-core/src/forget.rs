@@ -35,7 +35,6 @@ pub struct ForgetCandidate {
     pub is_protected: bool,
     pub protection_reason: Option<String>,
     pub action: ForgetAction,
-    pub links_decayed: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -174,7 +173,9 @@ impl ForgetEngine {
             Some(0)
         };
         let mut warnings = Vec::new();
-        if links_decayed.is_none() {
+        if !self.config.enabled {
+            warnings.push("Forgetting engine is disabled".into());
+        } else if links_decayed.is_none() {
             warnings.push(
                 "Semantic link decay is not implemented for this graph store/schema yet".into(),
             );
@@ -227,7 +228,6 @@ impl ForgetEngine {
                 is_protected,
                 protection_reason,
                 action,
-                links_decayed,
             });
         }
 
