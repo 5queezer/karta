@@ -2,7 +2,8 @@ use serde::{Deserialize, Serialize};
 use std::sync::LazyLock;
 
 static MARKDOWN_LINK_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
-    regex::Regex::new(r"\[([^\]]+)\]\(([^)]+)\)").expect("markdown link regex must compile")
+    regex::Regex::new(r"\[(?P<text>[^\]]+)\]\((?P<url>[^)]+)\)")
+        .expect("markdown link regex must compile")
 });
 
 /// Result of running an extractor on content.
@@ -128,7 +129,7 @@ impl Extractor for MarkdownExtractor {
             for caps in MARKDOWN_LINK_RE.captures_iter(line) {
                 result.facts.push(ExtractedFact {
                     key: "link".into(),
-                    value: format!("{} -> {}", &caps[1], &caps[2]),
+                    value: format!("{} -> {}", &caps["text"], &caps["url"]),
                     confidence: 1.0,
                 });
             }

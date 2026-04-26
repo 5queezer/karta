@@ -138,7 +138,7 @@ pub struct AskResult {
     /// Best reranker relevance score (None if reranker disabled).
     pub reranker_best_score: Option<f32>,
     /// Evidence packets explaining why each note was retrieved.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub evidence: Option<EvidencePacket>,
 }
 
