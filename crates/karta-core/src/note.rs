@@ -168,12 +168,12 @@ pub struct AskResult {
     /// Best reranker relevance score (None if reranker disabled).
     pub reranker_best_score: Option<f32>,
     /// Evidence packets explaining why each note was retrieved.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub evidence: Option<EvidencePacket>,
 }
 
 /// Evidence packet explaining why notes were retrieved for an answer.
-#[derive(Debug, Clone, Serialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct EvidencePacket {
     /// Per-channel retrieval traces (e.g., "ann", "facts", "profile").
     pub channel_traces: Vec<ChannelTrace>,
@@ -186,7 +186,7 @@ pub struct EvidencePacket {
 }
 
 /// Trace for a single retrieval channel.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChannelTrace {
     pub channel: String,
     /// Ranked hits for this channel, in retrieval order.
@@ -194,7 +194,7 @@ pub struct ChannelTrace {
     pub rrf_contribution: f64,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RankedHit {
     pub note_id: String,
     pub score: f32,

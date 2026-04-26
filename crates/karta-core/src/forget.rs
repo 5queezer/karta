@@ -77,7 +77,8 @@ impl ForgetEngine {
     }
 
     /// Run forgetting: archive stale low-activation notes, decay link weights.
-    /// Idempotent — running twice produces the same result.
+    /// Stable for a given evaluation time; decay scores depend on wall time, but
+    /// notes already archived by a previous run stay archived.
     pub async fn run_forgetting(&self) -> Result<ForgetRun> {
         if !self.config.enabled {
             let now = Utc::now();
@@ -165,17 +166,27 @@ impl ForgetEngine {
 
     /// Dry-run preview: returns the same candidates as an actual run without mutations.
     pub async fn preview_forgetting(&self) -> Result<ForgetPreview> {
-        let notes = self.vector_store.get_all().await?;
         let now = Utc::now();
+        if !self.config.enabled {
+            return Ok(ForgetPreview {
+                generated_at: now,
+                candidates: Vec::new(),
+                total_archived: 0,
+                total_deprecated: 0,
+                total_protected: 0,
+                links_decayed: Some(0),
+                warnings: vec!["Forgetting engine is disabled".into()],
+            });
+        }
+
+        let notes = self.vector_store.get_all().await?;
         let links_decayed = if self.config.enabled {
             self.decay_semantic_links(&now).await?
         } else {
             Some(0)
         };
         let mut warnings = Vec::new();
-        if !self.config.enabled {
-            warnings.push("Forgetting engine is disabled".into());
-        } else if links_decayed.is_none() {
+        if links_decayed.is_none() {
             warnings.push(
                 "Semantic link decay is not implemented for this graph store/schema yet".into(),
             );

@@ -180,20 +180,7 @@ impl DreamEngine {
             for episode_id in &undigested {
                 match self.graph_store.get_episode(episode_id).await {
                     Ok(Some(episode)) if episode.note_ids.is_empty() => {
-                        let digest = crate::note::EpisodeDigest {
-                            id: Uuid::new_v4().to_string(),
-                            episode_id: episode.id.clone(),
-                            entities: Vec::new(),
-                            date_range: None,
-                            aggregations: Vec::new(),
-                            topic_sequence: Vec::new(),
-                            digest_text: String::new(),
-                            digest_note_id: None,
-                            events: Vec::new(),
-                            created_at: Utc::now(),
-                        };
-                        self.graph_store.upsert_episode_digest(&digest).await?;
-                        debug!(episode_id = %episode_id, "Marked empty episode as digested");
+                        debug!(episode_id = %episode_id, "Episode has no notes; leaving undigested until notes are attached");
                     }
                     Ok(Some(episode)) => {
                         let note_refs: Vec<&str> =

@@ -1,4 +1,10 @@
 use serde::{Deserialize, Serialize};
+use std::sync::LazyLock;
+
+static MARKDOWN_LINK_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r"\[(?P<text>[^\]]+)\]\((?P<url>[^)]+)\)")
+        .expect("markdown link regex must compile")
+});
 
 /// Result of running an extractor on content.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -120,17 +126,10 @@ impl Extractor for MarkdownExtractor {
                 }
             }
 
-            if let (true, Some(link_text)) = (
-                line.starts_with('[') && line.contains("]("),
-                line.split_once("]("),
-            ) {
+            for caps in MARKDOWN_LINK_RE.captures_iter(line) {
                 result.facts.push(ExtractedFact {
                     key: "link".into(),
-                    value: format!(
-                        "{} -> {}",
-                        link_text.0.trim_start_matches('[').trim_end_matches(']'),
-                        link_text.1.trim_end_matches(')')
-                    ),
+                    value: format!("{} -> {}", &caps["text"], &caps["url"]),
                     confidence: 1.0,
                 });
             }
@@ -149,7 +148,11 @@ impl Extractor for JsonExtractor {
     }
 
     fn can_extract(&self, content_type: &str, content: &str) -> bool {
-        (content_type == "json") && content.trim_start().starts_with('{')
+        if content_type != "json" {
+            return false;
+        }
+        let head = content.trim_start();
+        head.starts_with('{') || head.starts_with('[')
     }
 
     fn extract(&self, _content_type: &str, content: &str) -> ExtractionResult {
