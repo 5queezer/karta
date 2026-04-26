@@ -174,7 +174,10 @@ impl crate::store::GraphStore for SqliteGraphStore {
         )
         .map_err(|e| KartaError::GraphStore(e.to_string()))?;
 
-        // Initialize schema_meta table and apply pending migrations
+        // This CREATE TABLE IF NOT EXISTS batch is the immutable schema v1
+        // baseline. Future schema changes should be added as forward migrations
+        // in migrate.rs rather than changing this baseline in-place.
+        // Initialize schema_meta table and apply pending migrations.
         migrate::init_and_migrate(&conn)?;
 
         Ok(())

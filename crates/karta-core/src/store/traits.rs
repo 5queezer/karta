@@ -147,5 +147,12 @@ pub trait GraphStore: Send + Sync {
     async fn init(&self) -> Result<()>;
 
     /// Get current schema metadata (version, applied/pending migrations).
-    async fn get_schema_meta(&self) -> Result<crate::migrate::SchemaMeta>;
+    async fn get_schema_meta(&self) -> Result<crate::migrate::SchemaMeta> {
+        Ok(crate::migrate::SchemaMeta::new(
+            0,
+            vec![],
+            vec![],
+            vec!["schema_meta unsupported by this backend".into()],
+        ))
+    }
 }

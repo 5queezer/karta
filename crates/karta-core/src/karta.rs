@@ -251,7 +251,8 @@ impl Karta {
     // --- Health ---
 
     pub async fn health_check(&self) -> Result<KartaHealth> {
-        let vector_ok = self.vector_store.count().await.is_ok();
+        let vector_count = self.vector_store.count().await;
+        let vector_ok = vector_count.is_ok();
         let graph_meta = self.graph_store.get_schema_meta().await;
         let graph_ok = graph_meta.is_ok();
 
@@ -271,8 +272,15 @@ impl Karta {
         };
 
         let mut warnings = warnings;
-        if !vector_ok {
-            warnings.push("Vector store health check failed".into());
+        if let Err(e) = vector_count {
+            warnings.push(format!("Vector store health check failed: {e}"));
+        }
+        if schema_version != crate::migrate::CURRENT_SCHEMA_VERSION {
+            warnings.push(format!(
+                "Schema version mismatch: found {}, expected {}",
+                schema_version,
+                crate::migrate::CURRENT_SCHEMA_VERSION
+            ));
         }
         if !pending.is_empty() {
             warnings.push(format!(
@@ -285,7 +293,7 @@ impl Karta {
         Ok(KartaHealth {
             vector_store_ok: vector_ok,
             graph_store_ok: graph_ok,
-            schema_version: schema_version.to_string(),
+            schema_version,
             pending_migrations: pending,
             warnings,
         })
@@ -297,7 +305,7 @@ impl Karta {
 pub struct KartaHealth {
     pub vector_store_ok: bool,
     pub graph_store_ok: bool,
-    pub schema_version: String,
+    pub schema_version: u32,
     pub pending_migrations: Vec<String>,
     pub warnings: Vec<String>,
 }
