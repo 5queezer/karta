@@ -217,8 +217,8 @@ pub fn init_and_migrate(conn: &Connection) -> Result<SchemaMeta> {
             schema_version,
             applied_migrations_json,
             last_migration_at
-        ) VALUES (1, ?1, '[]', ?2)",
-        rusqlite::params![CURRENT_SCHEMA_VERSION, Utc::now().to_rfc3339()],
+        ) VALUES (1, 0, '[]', ?1)",
+        rusqlite::params![Utc::now().to_rfc3339()],
     )
     .map_err(|e| KartaError::GraphStore(e.to_string()))?;
 

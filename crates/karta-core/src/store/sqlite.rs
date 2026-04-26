@@ -1010,11 +1010,24 @@ impl crate::store::GraphStore for SqliteGraphStore {
         ).map_err(|e| KartaError::GraphStore(e.to_string()))?;
         let rows = stmt
             .query_map([], |row| {
-                let condition: crate::rules::RuleCondition =
-                    serde_json::from_str(&row.get::<_, String>(3)?)
-                        .unwrap_or(crate::rules::RuleCondition::Always);
-                let actions: Vec<crate::rules::RuleAction> =
-                    serde_json::from_str(&row.get::<_, String>(4)?).unwrap_or_default();
+                let condition_json: String = row.get(3)?;
+                let condition: crate::rules::RuleCondition = serde_json::from_str(&condition_json)
+                    .map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            3,
+                            rusqlite::types::Type::Text,
+                            Box::new(e),
+                        )
+                    })?;
+                let actions_json: String = row.get(4)?;
+                let actions: Vec<crate::rules::RuleAction> = serde_json::from_str(&actions_json)
+                    .map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            4,
+                            rusqlite::types::Type::Text,
+                            Box::new(e),
+                        )
+                    })?;
                 let created_at = DateTime::parse_from_rfc3339(&row.get::<_, String>(9)?)
                     .unwrap_or_default()
                     .with_timezone(&Utc);

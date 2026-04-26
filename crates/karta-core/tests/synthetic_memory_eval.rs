@@ -25,7 +25,7 @@ async fn test_preference_update_flow() {
 #[tokio::test]
 async fn test_temporal_sequence_ordering() {
     let mut notes = Vec::new();
-    for i in 0..5 {
+    for i in [3_u32, 0, 4, 1, 2] {
         let mut note = MemoryNote::new(format!("Step {} of the process", i));
         note.turn_index = Some(i);
         notes.push(note);
