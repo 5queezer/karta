@@ -43,7 +43,9 @@ pub struct ExtractorRegistry {
 
 impl ExtractorRegistry {
     pub fn new() -> Self {
-        let mut registry = Self { extractors: Vec::new() };
+        let mut registry = Self {
+            extractors: Vec::new(),
+        };
         registry.register_default_extractors();
         registry
     }
@@ -73,6 +75,12 @@ impl ExtractorRegistry {
     }
 }
 
+impl Default for ExtractorRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Extractor for Markdown content.
 pub struct MarkdownExtractor;
 
@@ -91,7 +99,11 @@ impl Extractor for MarkdownExtractor {
         for line in content.lines() {
             if line.starts_with('#') {
                 let level = line.chars().take_while(|c| *c == '#').count();
-                let text = line.chars().skip(level).skip_while(|c| c.is_whitespace()).collect::<String>();
+                let text = line
+                    .chars()
+                    .skip(level)
+                    .skip_while(|c| c.is_whitespace())
+                    .collect::<String>();
                 result.facts.push(ExtractedFact {
                     key: format!("heading_level_{}", level),
                     value: text,
@@ -102,18 +114,25 @@ impl Extractor for MarkdownExtractor {
             if line.starts_with("```") {
                 let lang = line.strip_prefix("```").unwrap_or("").trim();
                 if !lang.is_empty() {
-                    result.metadata.push(("code_fence_language".into(), lang.into()));
+                    result
+                        .metadata
+                        .push(("code_fence_language".into(), lang.into()));
                 }
             }
 
-            if line.starts_with('[') && line.contains("](") {
-                if let Some(link_text) = line.split_once("](") {
-                    result.facts.push(ExtractedFact {
-                        key: "link".into(),
-                        value: format!("{} -> {}", link_text.0.trim_start_matches('[').trim_end_matches(']'), link_text.1.trim_end_matches(')')),
-                        confidence: 1.0,
-                    });
-                }
+            if let (true, Some(link_text)) = (
+                line.starts_with('[') && line.contains("]("),
+                line.split_once("]("),
+            ) {
+                result.facts.push(ExtractedFact {
+                    key: "link".into(),
+                    value: format!(
+                        "{} -> {}",
+                        link_text.0.trim_start_matches('[').trim_end_matches(']'),
+                        link_text.1.trim_end_matches(')')
+                    ),
+                    confidence: 1.0,
+                });
             }
         }
 
@@ -148,7 +167,11 @@ fn extract_json_paths(value: &serde_json::Value, path: &str, facts: &mut Vec<Ext
     match value {
         serde_json::Value::Object(map) => {
             for (key, val) in map {
-                let new_path = if path.is_empty() { key.clone() } else { format!("{}.{}", path, key) };
+                let new_path = if path.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{}.{}", path, key)
+                };
                 extract_json_paths(val, &new_path, facts);
             }
         }
@@ -265,7 +288,9 @@ impl Extractor for CargoTomlExtractor {
                         edge_type: "depends_on".into(),
                     });
                 } else if current_section == "workspace" && key == "members" {
-                    result.metadata.push(("workspace_members".into(), value.to_string()));
+                    result
+                        .metadata
+                        .push(("workspace_members".into(), value.to_string()));
                 }
             }
         }
