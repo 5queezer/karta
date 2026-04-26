@@ -22,7 +22,7 @@ system could find because they were never explicitly stored.
 - **Cross-encoder reranking** — Jina AI reranker for precise relevance scoring and intelligent abstention
 - **Temporal awareness** — exponential decay scoring, foresight signals with validity windows
 - **Provenance tracking** — every note tagged as FACT or INFERRED with confidence scores
-- **Forgetting** — note lifecycle (Active → Deprecated → Superseded → Archived) with access-based decay
+- **Forgetting engine** — `Karta::run_forgetting()` archives stale low-activation notes, `Karta::preview_forgetting()` dry-runs without mutations, exponential decay scoring with protected notes (profiles, episodes)
 - **Embedded by default** — LanceDB + SQLite, zero infrastructure. `cargo add karta` and go.
 
 ## Quick Start
