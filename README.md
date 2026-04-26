@@ -23,7 +23,7 @@ system could find because they were never explicitly stored.
 - **Temporal awareness** — exponential decay scoring, foresight signals with validity windows
 - **Provenance tracking** — every note tagged as FACT or INFERRED with confidence scores
 - **Forgetting** — note lifecycle (Active → Deprecated → Superseded → Archived) with access-based decay
-- **Embedded by default** — LanceDB + SQLite, zero infrastructure. `cargo add karta` and go.
+- **Evidence packets** — `AskResult` includes `EvidencePacket` with per-channel rank traces, fired rule IDs, contradiction IDs, and human-readable "why retrieved" explanations
 
 ## Quick Start
 
