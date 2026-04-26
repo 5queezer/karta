@@ -24,6 +24,8 @@ system could find because they were never explicitly stored.
 - **Provenance tracking** — every note tagged as FACT or INFERRED with confidence scores
 - **Forgetting** — note lifecycle (Active → Deprecated → Superseded → Archived) with access-based decay
 - **Embedded by default** — LanceDB + SQLite, zero infrastructure. `cargo add karta` and go.
+- **Schema versioning & health checks** — idempotent migrations, `Karta::health_check()`, `schema_meta` table tracks applied migrations
+- **Schema versioning & health checks** — idempotent migrations, `Karta::health_check()`, `schema_meta` table tracks applied migrations
 
 ## Quick Start
 
@@ -55,6 +57,7 @@ async fn main() {
 Write Path:  content → LLM attributes → embed → ANN search → link → evolve → store
 Read Path:   query → embed → ANN → rerank → multi-hop traverse → synthesize
 Dream Path:  cluster notes → deduction/induction/abduction/consolidation/contradiction → persist
+Health:      health_check() → vector store + graph store + schema version + pending migrations
 ```
 
 ### Storage (trait-based, pluggable)
@@ -156,6 +159,9 @@ karta/
 ```bash
 # Run tests (mock LLM, no API keys needed)
 cargo test
+
+# Run synthetic memory evals (zero API keys, deterministic)
+cargo test -p karta-core --test synthetic_memory_eval
 
 # Run real eval (requires .env credentials)
 cargo test --test real_eval -- --ignored --nocapture
