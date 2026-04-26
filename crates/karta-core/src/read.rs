@@ -836,18 +836,18 @@ impl ReadEngine {
         let mode_str = format!("{:?}", mode);
 
         if results.is_empty() {
-            return Ok(AskResult {
-                answer:
-                    "Based on the available memories, I don't have information about this topic."
-                        .to_string(),
-                query_mode: mode_str,
-                notes_used: 0,
-                note_ids: Vec::new(),
-                contradiction_injected: 0,
-                has_contradiction: false,
-                reranker_best_score: None,
-                evidence: None,
-            });
+            let mut result = AskResult::abstain(
+                "Based on the available memories, I don't have information about this topic."
+                    .to_string(),
+                mode_str.to_string(),
+            );
+            
+            if self.config.evidence_traces_enabled {
+                // TODO: Populate evidence when traces are enabled
+                // result.evidence = Some(EvidencePacket { ... });
+            }
+            
+            return Ok(result);
         }
 
         // --- Reranker: abstention gate + reorder results by cross-encoder relevance ---
@@ -943,16 +943,10 @@ impl ReadEngine {
         }
 
         if all_notes.is_empty() {
-            return Ok(AskResult {
-                answer: "No relevant memories found.".to_string(),
-                query_mode: mode_str,
-                notes_used: 0,
-                note_ids: Vec::new(),
-                contradiction_injected: 0,
-                has_contradiction: false,
-                reranker_best_score: reranker_best,
-                evidence: None,
-            });
+            return Ok(AskResult::abstain(
+                "No notes found for query.".to_string(),
+                mode_str.to_string(),
+            ));
         }
 
         // Sort notes by conversation order (turn_index > source_timestamp > created_at).
@@ -1156,16 +1150,11 @@ impl ReadEngine {
                 // Fallback: if the raw response is valid prose (not JSON), use it;
                 // otherwise abstain gracefully
                 if response.content.starts_with('{') {
-                    return Ok(AskResult {
-                        answer: "Based on the available memories, I don't have information about this topic.".to_string(),
-                        query_mode: mode_str,
-                        notes_used: collected_count,
-                        note_ids: collected_note_ids,
-                        contradiction_injected: contradiction_count,
-                        has_contradiction,
-                        reranker_best_score: reranker_best,
-                        evidence: None,
-                    });
+            return Ok(AskResult::abstain(
+                "Based on the available memories, I don't have information about this topic."
+                    .to_string(),
+                mode_str.to_string(),
+            ));
                 }
                 response.content.clone()
             }
@@ -1274,16 +1263,23 @@ impl ReadEngine {
                         }
 
                         info!("Retry produced confident answer, using it");
-                        return Ok(AskResult {
-                            answer: final_answer,
-                            query_mode: mode_str,
-                            notes_used: retry_notes.len(),
-                            note_ids: retry_note_ids,
-                            contradiction_injected: 0,
-                            has_contradiction: retry_has_contradiction,
-                            reranker_best_score: reranker_best,
-                            evidence: None,
-                        });
+            let mut result = AskResult {
+                answer: final_answer,
+                query_mode: mode_str,
+                notes_used: retry_notes.len(),
+                note_ids: retry_note_ids,
+                contradiction_injected: 0,
+                has_contradiction: retry_has_contradiction,
+                reranker_best_score: reranker_best,
+                evidence: None,
+            };
+            
+            if self.config.evidence_traces_enabled {
+                // TODO: Populate evidence when traces are enabled
+                // result.evidence = Some(EvidencePacket { ... });
+            }
+            
+            return Ok(result);
                     }
                 }
                 info!("Retry also insufficient or failed, keeping original answer");

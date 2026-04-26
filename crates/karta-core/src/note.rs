@@ -142,8 +142,24 @@ pub struct AskResult {
     pub evidence: Option<EvidencePacket>,
 }
 
+impl AskResult {
+    /// Create an abstention result with no evidence.
+    pub fn abstain(answer: String, query_mode: String) -> Self {
+        Self {
+            answer,
+            query_mode,
+            notes_used: 0,
+            note_ids: Vec::new(),
+            contradiction_injected: 0,
+            has_contradiction: false,
+            reranker_best_score: None,
+            evidence: None,
+        }
+    }
+}
+
 /// Evidence packet explaining why notes were retrieved for an answer.
-#[derive(Debug, Clone, Serialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct EvidencePacket {
     /// Per-channel retrieval traces (e.g., "ann", "facts", "profile").
     pub channel_traces: Vec<ChannelTrace>,
@@ -156,7 +172,7 @@ pub struct EvidencePacket {
 }
 
 /// Trace for a single retrieval channel.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ChannelTrace {
     pub channel: String,
     /// Ranked hits for this channel, in retrieval order.
@@ -164,7 +180,7 @@ pub struct ChannelTrace {
     pub rrf_contribution: f64,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RankedHit {
     pub note_id: String,
     pub score: f32,

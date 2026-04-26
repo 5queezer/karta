@@ -118,6 +118,8 @@ pub struct ReadConfig {
     pub fact_retrieval_enabled: bool,
     /// Score boost for notes found via fact match.
     pub fact_match_boost: f32,
+    /// Whether to populate evidence traces in AskResult.
+    pub evidence_traces_enabled: bool,
 }
 
 impl Default for ReadConfig {
@@ -137,6 +139,7 @@ impl Default for ReadConfig {
             episode_drilldown_min_score: 0.25,
             fact_retrieval_enabled: true,
             fact_match_boost: 0.1,
+            evidence_traces_enabled: false,
         }
     }
 }
