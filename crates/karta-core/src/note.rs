@@ -159,9 +159,15 @@ pub struct EvidencePacket {
 #[derive(Debug, Clone, Serialize)]
 pub struct ChannelTrace {
     pub channel: String,
-    pub note_ids: Vec<String>,
-    pub scores: Vec<f32>,
+    /// Ranked hits for this channel, in retrieval order.
+    pub ranked: Vec<RankedHit>,
     pub rrf_contribution: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RankedHit {
+    pub note_id: String,
+    pub score: f32,
 }
 
 /// A forward-looking statement extracted by the LLM during attribute generation.
