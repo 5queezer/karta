@@ -1,3 +1,4 @@
+pub mod activate;
 pub mod config;
 pub mod contradiction;
 pub mod dream;
