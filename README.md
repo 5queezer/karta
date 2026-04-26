@@ -23,7 +23,7 @@ system could find because they were never explicitly stored.
 - **Temporal awareness** — exponential decay scoring, foresight signals with validity windows
 - **Provenance tracking** — every note tagged as FACT or INFERRED with confidence scores
 - **Forgetting** — note lifecycle (Active → Deprecated → Superseded → Archived) with access-based decay
-- **Embedded by default** — LanceDB + SQLite, zero infrastructure. `cargo add karta` and go.
+- **Procedural memory** — `RuleEngine` with safe `ProceduralRule` DSL (query/session/contradiction conditions → prompt/retrieval actions only), fire-count tracking, note-sourced rules protected from forgetting
 
 ## Quick Start
 
