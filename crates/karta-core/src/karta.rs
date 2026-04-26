@@ -98,24 +98,24 @@ impl Karta {
         // Load .env if present (silently ignore if missing)
         let _ = dotenvy::dotenv();
 
-        let lance_uri = config.storage.lance_uri.clone()
+        let lance_uri = config
+            .storage
+            .lance_uri
+            .clone()
             .unwrap_or_else(|| format!("{}/lance", config.storage.data_dir));
-        let vector_store = Arc::new(
-            LanceVectorStore::new(&lance_uri).await?,
-        ) as Arc<dyn VectorStore>;
+        let vector_store =
+            Arc::new(LanceVectorStore::new(&lance_uri).await?) as Arc<dyn VectorStore>;
 
-        let graph_store = Arc::new(
-            SqliteGraphStore::new(&config.storage.data_dir)?,
-        ) as Arc<dyn GraphStore>;
+        let graph_store =
+            Arc::new(SqliteGraphStore::new(&config.storage.data_dir)?) as Arc<dyn GraphStore>;
 
         let model_ref = &config.llm.default;
 
         // Determine embedding model from config or env
-        let embedding_model = std::env::var("KARTA_EMBEDDING_MODEL")
-            .unwrap_or_else(|_| {
-                std::env::var("AZURE_OPENAI_EMBEDDING_MODEL")
-                    .unwrap_or_else(|_| "text-embedding-3-small".to_string())
-            });
+        let embedding_model = std::env::var("KARTA_EMBEDDING_MODEL").unwrap_or_else(|_| {
+            std::env::var("AZURE_OPENAI_EMBEDDING_MODEL")
+                .unwrap_or_else(|_| "text-embedding-3-small".to_string())
+        });
 
         // Build LLM provider based on what credentials are available
         let llm: Arc<dyn LlmProvider> = if let Some(ref base_url) = model_ref.base_url {
@@ -127,10 +127,11 @@ impl Karta {
             ))
         } else if let Ok(azure_key) = std::env::var("AZURE_OPENAI_API_KEY") {
             // Azure OpenAI — uses native AzureConfig for correct URL construction
-            let endpoint = std::env::var("AZURE_OPENAI_ENDPOINT")
-                .map_err(|_| KartaError::Config(
+            let endpoint = std::env::var("AZURE_OPENAI_ENDPOINT").map_err(|_| {
+                KartaError::Config(
                     "AZURE_OPENAI_API_KEY is set but AZURE_OPENAI_ENDPOINT is missing".into(),
-                ))?;
+                )
+            })?;
             let chat_model = std::env::var("AZURE_OPENAI_CHAT_MODEL")
                 .unwrap_or_else(|_| model_ref.model.clone());
             let api_version = std::env::var("AZURE_OPENAI_API_VERSION")
@@ -145,10 +146,7 @@ impl Karta {
             ))
         } else {
             // Standard OpenAI (reads OPENAI_API_KEY from env automatically)
-            Arc::new(OpenAiProvider::new(
-                &model_ref.model,
-                &embedding_model,
-            ))
+            Arc::new(OpenAiProvider::new(&model_ref.model, &embedding_model))
         };
 
         Self::new(vector_store, graph_store, llm, config).await
@@ -206,11 +204,7 @@ impl Karta {
 
     // --- Dream ---
 
-    pub async fn run_dreaming(
-        &self,
-        scope_type: &str,
-        scope_id: &str,
-    ) -> Result<DreamRun> {
+    pub async fn run_dreaming(&self, scope_type: &str, scope_id: &str) -> Result<DreamRun> {
         let engine = DreamEngine::new(
             Arc::clone(&self.vector_store),
             Arc::clone(&self.graph_store),

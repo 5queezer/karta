@@ -5,8 +5,8 @@
 //!
 //! Run with: cargo test -p karta-core --test synthetic_memory_eval
 
+use karta_core::migrate::{CURRENT_SCHEMA_VERSION, SchemaMeta};
 use karta_core::note::{MemoryNote, Provenance};
-use karta_core::migrate::{SchemaMeta, CURRENT_SCHEMA_VERSION};
 
 // ─── Synthetic Dataset: Preference Update ──────────────────────────────────
 
@@ -57,16 +57,32 @@ async fn test_forgetting_decay_scoring() {
     let old_score = 0.5_f64.powf(90.0 / decay_half_life_days); // 0.5^3 = 0.125
     let recent_score = 0.5_f64.powf(1.0 / decay_half_life_days); // ~0.977
 
-    assert!(old_score < 0.13, "Old note should have low decay score: {}", old_score);
-    assert!(recent_score > 0.95, "Recent note should have high decay score: {}", recent_score);
-    assert!(old_score < archive_threshold, "Old note should be below archive threshold");
-    assert!(recent_score > archive_threshold, "Recent note should be above archive threshold");
+    assert!(
+        old_score < 0.13,
+        "Old note should have low decay score: {}",
+        old_score
+    );
+    assert!(
+        recent_score > 0.95,
+        "Recent note should have high decay score: {}",
+        recent_score
+    );
+    assert!(
+        old_score < archive_threshold,
+        "Old note should be below archive threshold"
+    );
+    assert!(
+        recent_score > archive_threshold,
+        "Recent note should be above archive threshold"
+    );
 }
 
 #[tokio::test]
 async fn test_forgetting_protected_notes() {
     let mut profile_note = MemoryNote::new("Profile: John is a developer".into());
-    profile_note.provenance = Provenance::Profile { entity_id: "john".into() };
+    profile_note.provenance = Provenance::Profile {
+        entity_id: "john".into(),
+    };
 
     assert!(profile_note.is_profile());
 }
@@ -75,14 +91,10 @@ async fn test_forgetting_protected_notes() {
 
 #[tokio::test]
 async fn test_schema_meta_structure() {
-    assert!(CURRENT_SCHEMA_VERSION >= 1);
+    let current_schema_version = CURRENT_SCHEMA_VERSION;
+    assert!(current_schema_version >= 1);
 
-    let meta = SchemaMeta::new(
-        1,
-        vec!["001_initial".into()],
-        vec![],
-        vec![],
-    );
+    let meta = SchemaMeta::new(1, vec!["001_initial".into()], vec![], vec![]);
 
     assert_eq!(meta.schema_version, 1);
     assert_eq!(meta.applied_migrations.len(), 1);
@@ -98,7 +110,9 @@ async fn test_entity_profile_detection() {
     assert!(!profile_note.is_profile());
 
     let mut real_profile = MemoryNote::new("Profile: John is a developer".into());
-    real_profile.provenance = Provenance::Profile { entity_id: "john".into() };
+    real_profile.provenance = Provenance::Profile {
+        entity_id: "john".into(),
+    };
     assert!(real_profile.is_profile());
 }
 

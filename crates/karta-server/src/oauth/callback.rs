@@ -1,7 +1,7 @@
 use axum::extract::{Query, State};
 use axum::response::{IntoResponse, Redirect, Response};
+use oauth2::TokenResponse as _; // for access_token() on GitHub response
 use oauth2::{AuthorizationCode, PkceCodeVerifier};
-use oauth2::TokenResponse as _;  // for access_token() on GitHub response
 use openidconnect::TokenResponse as _; // for id_token() on Google response
 use serde::Deserialize;
 
@@ -23,8 +23,13 @@ pub async fn google_callback(
     Query(params): Query<CallbackParams>,
 ) -> Result<Response> {
     if let Some(err) = &params.error {
-        let desc = params.error_description.as_deref().unwrap_or("Unknown error");
-        return Err(ServerError::IdpError(format!("Google OAuth error: {err}: {desc}")));
+        let desc = params
+            .error_description
+            .as_deref()
+            .unwrap_or("Unknown error");
+        return Err(ServerError::IdpError(format!(
+            "Google OAuth error: {err}: {desc}"
+        )));
     }
 
     let idp_code = params
@@ -43,14 +48,18 @@ pub async fn google_callback(
         .ok_or_else(|| ServerError::BadRequest("Unknown or expired state".to_string()))?;
 
     if pending.provider != "google" {
-        return Err(ServerError::BadRequest("State does not match Google provider".to_string()));
+        return Err(ServerError::BadRequest(
+            "State does not match Google provider".to_string(),
+        ));
     }
 
     // Check expiry
     let expires = chrono::NaiveDateTime::parse_from_str(&pending.expires_at, "%Y-%m-%dT%H:%M:%SZ")
         .map_err(|e| ServerError::Internal(format!("Bad expiry: {e}")))?;
     if expires.and_utc() < chrono::Utc::now() {
-        return Err(ServerError::BadRequest("Authorization request expired".to_string()));
+        return Err(ServerError::BadRequest(
+            "Authorization request expired".to_string(),
+        ));
     }
 
     // Exchange code for tokens at Google
@@ -95,13 +104,16 @@ pub async fn google_callback(
         });
 
     // Upsert user
-    let user = state.db.upsert_user("google", &sub, email.as_deref(), name.as_deref())?;
+    let user = state
+        .db
+        .upsert_user("google", &sub, email.as_deref(), name.as_deref())?;
 
     // Generate authorization code for the downstream client
     let auth_code = generate_auth_code(&state, &pending, &user.id)?;
 
     // Redirect to client's redirect_uri
-    let redirect_url = build_client_redirect(&pending.redirect_uri, &auth_code, &pending.original_state);
+    let redirect_url =
+        build_client_redirect(&pending.redirect_uri, &auth_code, &pending.original_state);
     tracing::info!(user_id = %user.id, provider = "google", "User authenticated");
 
     Ok(Redirect::temporary(&redirect_url).into_response())
@@ -113,8 +125,13 @@ pub async fn github_callback(
     Query(params): Query<CallbackParams>,
 ) -> Result<Response> {
     if let Some(err) = &params.error {
-        let desc = params.error_description.as_deref().unwrap_or("Unknown error");
-        return Err(ServerError::IdpError(format!("GitHub OAuth error: {err}: {desc}")));
+        let desc = params
+            .error_description
+            .as_deref()
+            .unwrap_or("Unknown error");
+        return Err(ServerError::IdpError(format!(
+            "GitHub OAuth error: {err}: {desc}"
+        )));
     }
 
     let idp_code = params
@@ -133,14 +150,18 @@ pub async fn github_callback(
         .ok_or_else(|| ServerError::BadRequest("Unknown or expired state".to_string()))?;
 
     if pending.provider != "github" {
-        return Err(ServerError::BadRequest("State does not match GitHub provider".to_string()));
+        return Err(ServerError::BadRequest(
+            "State does not match GitHub provider".to_string(),
+        ));
     }
 
     // Check expiry
     let expires = chrono::NaiveDateTime::parse_from_str(&pending.expires_at, "%Y-%m-%dT%H:%M:%SZ")
         .map_err(|e| ServerError::Internal(format!("Bad expiry: {e}")))?;
     if expires.and_utc() < chrono::Utc::now() {
-        return Err(ServerError::BadRequest("Authorization request expired".to_string()));
+        return Err(ServerError::BadRequest(
+            "Authorization request expired".to_string(),
+        ));
     }
 
     // Exchange code for tokens at GitHub
@@ -186,13 +207,16 @@ pub async fn github_callback(
     let name = github_user.name.or(github_user.login);
 
     // Upsert user
-    let user = state.db.upsert_user("github", &sub, email.as_deref(), name.as_deref())?;
+    let user = state
+        .db
+        .upsert_user("github", &sub, email.as_deref(), name.as_deref())?;
 
     // Generate authorization code
     let auth_code = generate_auth_code(&state, &pending, &user.id)?;
 
     // Redirect to client's redirect_uri
-    let redirect_url = build_client_redirect(&pending.redirect_uri, &auth_code, &pending.original_state);
+    let redirect_url =
+        build_client_redirect(&pending.redirect_uri, &auth_code, &pending.original_state);
     tracing::info!(user_id = %user.id, provider = "github", "User authenticated");
 
     Ok(Redirect::temporary(&redirect_url).into_response())

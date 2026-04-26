@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::str::FromStr;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -26,7 +27,7 @@ impl DreamType {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse_kind(s: &str) -> Option<Self> {
         match s {
             "deduction" => Some(Self::Deduction),
             "induction" => Some(Self::Induction),
@@ -37,6 +38,14 @@ impl DreamType {
             "cross_episode_digest" => Some(Self::CrossEpisodeDigest),
             _ => None,
         }
+    }
+}
+
+impl FromStr for DreamType {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::parse_kind(s).ok_or(())
     }
 }
 

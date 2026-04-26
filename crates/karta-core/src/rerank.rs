@@ -110,7 +110,16 @@ impl Reranker for LlmReranker {
             .enumerate()
             .map(|(i, (note, _))| {
                 let content = if note.content.len() > 200 {
-                    format!("{}...", &note.content[..note.content.char_indices().take(200).last().map(|(i,_)|i).unwrap_or(200)])
+                    format!(
+                        "{}...",
+                        &note.content[..note
+                            .content
+                            .char_indices()
+                            .take(200)
+                            .last()
+                            .map(|(i, _)| i)
+                            .unwrap_or(200)]
+                    )
                 } else {
                     note.content.clone()
                 };
@@ -142,8 +151,7 @@ impl Reranker for LlmReranker {
         };
 
         let response = self.llm.chat(&messages, &config).await?;
-        let parsed: serde_json::Value =
-            serde_json::from_str(&response.content).unwrap_or_default();
+        let parsed: serde_json::Value = serde_json::from_str(&response.content).unwrap_or_default();
 
         let scores: Vec<f32> = parsed["scores"]
             .as_array()
@@ -226,7 +234,15 @@ impl Reranker for JinaReranker {
             .map(|(note, _)| {
                 let content = &note.content;
                 if content.len() > 500 {
-                    format!("{}...", &content[..content.char_indices().take(500).last().map(|(i,_)|i).unwrap_or(500)])
+                    format!(
+                        "{}...",
+                        &content[..content
+                            .char_indices()
+                            .take(500)
+                            .last()
+                            .map(|(i, _)| i)
+                            .unwrap_or(500)]
+                    )
                 } else {
                     content.clone()
                 }
@@ -257,10 +273,7 @@ impl Reranker for JinaReranker {
             .map_err(|e| crate::error::KartaError::Llm(format!("Jina parse error: {}", e)))?;
 
         // Parse Jina response: results[].index + results[].relevance_score
-        let jina_results = resp_body["results"]
-            .as_array()
-            .cloned()
-            .unwrap_or_default();
+        let jina_results = resp_body["results"].as_array().cloned().unwrap_or_default();
 
         // Build index → score map
         let mut score_map: std::collections::HashMap<usize, f32> = std::collections::HashMap::new();
