@@ -17,7 +17,12 @@ use crate::store::{GraphStore, VectorStore};
 fn activate_enabled(cfg: &ReadConfig) -> bool {
     cfg.activate.enabled
         || std::env::var("KARTA_ACTIVATE_ENABLED")
-            .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes"))
+            .map(|v| {
+                matches!(
+                    v.trim().to_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
             .unwrap_or(false)
 }
 

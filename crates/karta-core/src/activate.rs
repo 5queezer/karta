@@ -174,10 +174,12 @@ impl ActivateEngine {
         }
 
         let fused = rrf(&channels, &weights, self.cfg().rrf_k);
-        let top_ids: Vec<String> = fused.into_iter().take(top_k).map(|(id, _)| id).collect();
+        let fused_ids: Vec<String> = fused.iter().map(|(id, _)| id.clone()).collect();
 
-        // Map ids back to MemoryNotes (keep ranking order).
-        let id_refs: Vec<&str> = top_ids.iter().map(|s| s.as_str()).collect();
+        // Map ids back to MemoryNotes. Fetch the fused candidate list before
+        // active filtering so inactive high-ranked notes do not reduce the
+        // returned set below top_k when lower-ranked active notes are available.
+        let id_refs: Vec<&str> = fused_ids.iter().map(|s| s.as_str()).collect();
         let mut notes_by_id: HashMap<String, MemoryNote> = self
             .vector_store
             .get_many(&id_refs)
@@ -186,15 +188,18 @@ impl ActivateEngine {
             .map(|n| (n.id.clone(), n))
             .collect();
 
-        let mut results: Vec<SearchResult> = Vec::with_capacity(top_ids.len());
-        for id in &top_ids {
-            if let Some(note) = notes_by_id.remove(id) {
+        let mut results: Vec<SearchResult> = Vec::with_capacity(top_k.min(fused.len()));
+        for (id, fused_score) in fused {
+            if let Some(note) = notes_by_id.remove(&id) {
                 if note.is_active() {
                     results.push(SearchResult {
                         note,
-                        score: 0.0,
+                        score: fused_score,
                         linked_notes: Vec::new(),
                     });
+                    if results.len() >= top_k {
+                        break;
+                    }
                 }
             }
         }

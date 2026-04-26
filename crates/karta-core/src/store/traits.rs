@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
-use crate::error::Result;
+use crate::error::{KartaError, Result};
 use crate::note::{
     AtomicFact, CrossEpisodeDigest, Episode, EpisodeDigest, ForesightSignal, MemoryNote,
 };
@@ -79,13 +79,18 @@ pub trait VectorStore: Send + Sync {
         Ok(())
     }
 
-    /// Batch variant of `bump_access`. Override for a single transaction in
-    /// stores that support it.
-    async fn bump_access_many(&self, ids: &[&str], at: DateTime<Utc>) -> Result<()> {
-        for id in ids {
-            self.bump_access(id, at).await?;
-        }
-        Ok(())
+    /// Batch variant of `bump_access`. Stores must override this with a native
+    /// partial update / transaction before enabling ACTIVATE trace writes.
+    ///
+    /// The old default looped through `bump_access`, which can devolve into a
+    /// full-note read-modify-write via `get` + `upsert`. That is not silently
+    /// safe for batch trace updates because concurrent writers can lose access
+    /// increments or overwrite note content/context. Return an explicit
+    /// unsupported error instead of pretending the unsafe fallback is atomic.
+    async fn bump_access_many(&self, _ids: &[&str], _at: DateTime<Utc>) -> Result<()> {
+        Err(KartaError::VectorStore(
+            "bump_access_many requires a store-specific atomic implementation".into(),
+        ))
     }
 
     /// Find the most recent note in a given session (by turn_index, then
@@ -191,7 +196,7 @@ pub trait GraphStore: Send + Sync {
         max: f32,
     ) -> Result<()> {
         for (a, b) in pairs {
-            let _ = self.bump_link_weight(a, b, delta, max).await;
+            self.bump_link_weight(a, b, delta, max).await?;
         }
         Ok(())
     }
