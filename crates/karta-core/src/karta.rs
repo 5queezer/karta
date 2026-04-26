@@ -4,12 +4,14 @@ use chrono::{DateTime, Utc};
 
 use crate::config::KartaConfig;
 use crate::dream::{DreamEngine, DreamRun};
-use crate::error::{KartaError, Result};
+use crate::error::Result;
 use crate::forget::{ForgetEngine, ForgetPreview, ForgetRun};
 use crate::llm::LlmProvider;
 use crate::note::{MemoryNote, SearchResult};
 use crate::read::ReadEngine;
 use crate::rerank::{JinaReranker, LlmReranker, NoopReranker, Reranker};
+use crate::rules::{ProceduralRule, RuleContext, RuleEvaluation};
+use crate::rules_engine::RuleEngine;
 use crate::store::{GraphStore, VectorStore};
 use crate::write::WriteEngine;
 
@@ -92,6 +94,7 @@ impl Karta {
     /// per-operation via `config.llm.overrides`.
     #[cfg(all(feature = "lance", feature = "sqlite", feature = "openai"))]
     pub async fn with_defaults(config: KartaConfig) -> Result<Self> {
+        use crate::error::KartaError;
         use crate::llm::OpenAiProvider;
         use crate::store::lance::LanceVectorStore;
         use crate::store::sqlite::SqliteGraphStore;
@@ -271,14 +274,17 @@ impl Karta {
         let graph_ok = graph_meta.is_ok();
 
         let (schema_version, pending, mut warnings) = match graph_meta {
-            Ok(meta) => (meta.schema_version, meta.pending_migrations, meta.warnings),
+            Ok(meta) => (
+                Some(meta.schema_version.to_string()),
+                meta.pending_migrations,
+                meta.warnings,
+            ),
             Err(ref e) => (
-                0,
+                None,
                 vec![],
                 vec![format!("Graph store schema meta unavailable: {e}")],
             ),
         };
-
         if !vector_ok {
             warnings.push("Vector store health check failed".into());
         }
@@ -298,6 +304,29 @@ impl Karta {
             warnings,
         })
     }
+
+
+    // --- Rules ---
+
+    pub async fn evaluate_rules(&self, ctx: &RuleContext) -> Result<RuleEvaluation> {
+        let engine = RuleEngine::new(Arc::clone(&self.graph_store));
+        engine.evaluate(ctx).await
+    }
+
+    pub async fn add_rule(&self, rule: ProceduralRule) -> Result<()> {
+        let engine = RuleEngine::new(Arc::clone(&self.graph_store));
+        engine.add_rule(rule).await
+    }
+
+    pub async fn disable_rule(&self, rule_id: &str) -> Result<()> {
+        let engine = RuleEngine::new(Arc::clone(&self.graph_store));
+        engine.disable_rule(rule_id).await
+    }
+
+    pub async fn list_rules(&self) -> Result<Vec<ProceduralRule>> {
+        let engine = RuleEngine::new(Arc::clone(&self.graph_store));
+        engine.list_rules().await
+    }
 }
 
 /// Health status of a Karta instance.
@@ -305,7 +334,7 @@ impl Karta {
 pub struct KartaHealth {
     pub vector_store_ok: bool,
     pub graph_store_ok: bool,
-    pub schema_version: u32,
+    pub schema_version: Option<String>,
     pub pending_migrations: Vec<String>,
     pub warnings: Vec<String>,
 }
