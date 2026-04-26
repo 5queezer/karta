@@ -65,6 +65,7 @@ pub fn all_migrations() -> Vec<Migration> {
             resolved_at TEXT,
             resolved_by TEXT,
             ignore_reason TEXT,
+            ignored_at TEXT,
             created_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
         CREATE INDEX IF NOT EXISTS idx_contradictions_entity ON contradictions(entity);

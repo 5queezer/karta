@@ -44,6 +44,7 @@ pub struct Contradiction {
     pub resolved_at: Option<DateTime<Utc>>,
     pub resolved_by: Option<String>,
     pub ignore_reason: Option<String>,
+    pub ignored_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -67,6 +68,7 @@ impl Contradiction {
             resolved_at: None,
             resolved_by: None,
             ignore_reason: None,
+            ignored_at: None,
             created_at: Utc::now(),
         }
     }
