@@ -1,6 +1,6 @@
-use serde::{Deserialize, Serialize};
 use chrono::Utc;
 use rusqlite::Connection;
+use serde::{Deserialize, Serialize};
 
 use crate::error::{KartaError, Result};
 
@@ -17,7 +17,12 @@ pub struct SchemaMeta {
 }
 
 impl SchemaMeta {
-    pub fn new(version: u32, applied: Vec<String>, pending: Vec<String>, warnings: Vec<String>) -> Self {
+    pub fn new(
+        version: u32,
+        applied: Vec<String>,
+        pending: Vec<String>,
+        warnings: Vec<String>,
+    ) -> Self {
         Self {
             schema_version: version,
             applied_migrations: applied,
@@ -53,7 +58,7 @@ pub fn load_schema_meta(conn: &Connection) -> Result<SchemaMeta> {
 
     match result {
         Ok((version, applied_json)) => {
-            let applied: Vec<String> = serde_json::from_str(&applied_json).unwrap_or_default();
+            let applied: Vec<String> = serde_json::from_str(&applied_json)?;
             let all_ids: Vec<&str> = all_migrations().iter().map(|m| m.id).collect();
             let pending: Vec<String> = all_ids
                 .iter()
@@ -62,9 +67,7 @@ pub fn load_schema_meta(conn: &Connection) -> Result<SchemaMeta> {
                 .collect();
             Ok(SchemaMeta::new(version, applied, pending, vec![]))
         }
-        Err(rusqlite::Error::QueryReturnedNoRows) => {
-            Ok(SchemaMeta::new(0, vec![], vec![], vec![]))
-        }
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(SchemaMeta::new(0, vec![], vec![], vec![])),
         Err(e) => Err(KartaError::GraphStore(e.to_string())),
     }
 }
@@ -78,6 +81,7 @@ pub fn apply_migrations(conn: &Connection) -> Result<SchemaMeta> {
     }
 
     let migrations = all_migrations();
+    let mut applied = meta.applied_migrations.clone();
 
     for pending_id in &meta.pending_migrations {
         let migration = migrations.iter().find(|m| m.id == pending_id.as_str());
@@ -91,7 +95,8 @@ pub fn apply_migrations(conn: &Connection) -> Result<SchemaMeta> {
             }
         };
 
-        let tx = conn.unchecked_transaction()
+        let tx = conn
+            .unchecked_transaction()
             .map_err(|e| KartaError::GraphStore(e.to_string()))?;
 
         if let Err(e) = tx.execute_batch(migration.up_sql) {
@@ -103,10 +108,8 @@ pub fn apply_migrations(conn: &Connection) -> Result<SchemaMeta> {
         }
 
         // Update schema_meta to record this migration
-        let mut applied = meta.applied_migrations.clone();
         applied.push(migration.id.to_string());
-        let applied_json = serde_json::to_string(&applied)
-            .map_err(|e| KartaError::Serialization(e))?;
+        let applied_json = serde_json::to_string(&applied)?;
         let now = Utc::now().to_rfc3339();
 
         if let Err(e) = tx.execute(
@@ -116,7 +119,7 @@ pub fn apply_migrations(conn: &Connection) -> Result<SchemaMeta> {
                  schema_version = ?1,
                  applied_migrations_json = ?2,
                  last_migration_at = ?3",
-            rusqlite::params![applied.len(), applied_json, now],
+            rusqlite::params![CURRENT_SCHEMA_VERSION, applied_json, now],
         ) {
             let _ = tx.rollback();
             return Err(KartaError::GraphStore(format!(
@@ -147,7 +150,8 @@ pub fn init_and_migrate(conn: &Connection) -> Result<SchemaMeta> {
             last_migration_at TEXT
         )",
         [],
-    ).map_err(|e| KartaError::GraphStore(e.to_string()))?;
+    )
+    .map_err(|e| KartaError::GraphStore(e.to_string()))?;
 
     apply_migrations(conn)
 }

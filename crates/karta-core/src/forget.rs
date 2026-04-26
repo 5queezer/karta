@@ -4,8 +4,8 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 
 use crate::config::ForgetConfig;
-use crate::error::{KartaError, Result};
-use crate::note::{MemoryNote, NoteStatus};
+use crate::error::Result;
+use crate::note::{MemoryNote, NoteStatus, Provenance};
 use crate::store::{GraphStore, VectorStore};
 
 /// Result of a forgetting run.
@@ -21,7 +21,8 @@ pub struct ForgetRun {
     pub archived_ids: Vec<String>,
     pub deprecated_ids: Vec<String>,
     pub protected_ids: Vec<String>,
-    pub links_decayed: usize,
+    pub links_decayed: Option<usize>,
+    pub warnings: Vec<String>,
 }
 
 /// A candidate for forgetting (used in preview and actual runs).
@@ -34,6 +35,7 @@ pub struct ForgetCandidate {
     pub is_protected: bool,
     pub protection_reason: Option<String>,
     pub action: ForgetAction,
+    pub links_decayed: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -51,6 +53,8 @@ pub struct ForgetPreview {
     pub total_archived: usize,
     pub total_deprecated: usize,
     pub total_protected: usize,
+    pub links_decayed: Option<usize>,
+    pub warnings: Vec<String>,
 }
 
 /// Engine that performs access-based forgetting over notes and link decay.
@@ -77,10 +81,11 @@ impl ForgetEngine {
     /// Idempotent — running twice produces the same result.
     pub async fn run_forgetting(&self) -> Result<ForgetRun> {
         if !self.config.enabled {
+            let now = Utc::now();
             return Ok(ForgetRun {
                 run_id: uuid::Uuid::new_v4().to_string(),
-                started_at: Utc::now(),
-                completed_at: Utc::now(),
+                started_at: now,
+                completed_at: now,
                 notes_inspected: 0,
                 notes_archived: 0,
                 notes_deprecated: 0,
@@ -88,7 +93,8 @@ impl ForgetEngine {
                 archived_ids: vec![],
                 deprecated_ids: vec![],
                 protected_ids: vec![],
-                links_decayed: 0,
+                links_decayed: Some(0),
+                warnings: vec!["Forgetting engine is disabled".into()],
             });
         }
 
@@ -101,7 +107,10 @@ impl ForgetEngine {
         let notes_inspected = notes.len();
 
         for note in &notes {
-            if !note.is_active() {
+            if matches!(
+                note.status,
+                NoteStatus::Archived | NoteStatus::Superseded { .. }
+            ) {
                 continue;
             }
 
@@ -118,9 +127,13 @@ impl ForgetEngine {
                 updated.updated_at = Utc::now();
                 self.vector_store.upsert(&updated).await?;
                 archived_ids.push(note.id.clone());
-            } else if decay_score < (self.config.archive_threshold as f64 * 2.0) {
+            } else if note.status == NoteStatus::Active
+                && decay_score < (self.config.archive_threshold as f64 * 2.0)
+            {
                 let mut updated = note.clone();
-                updated.status = NoteStatus::Deprecated { by: "forgetting_engine".into() };
+                updated.status = NoteStatus::Deprecated {
+                    by: "forgetting_engine".into(),
+                };
                 updated.updated_at = Utc::now();
                 self.vector_store.upsert(&updated).await?;
                 deprecated_ids.push(note.id.clone());
@@ -128,6 +141,12 @@ impl ForgetEngine {
         }
 
         let links_decayed = self.decay_semantic_links(&started_at).await?;
+        let mut warnings = Vec::new();
+        if links_decayed.is_none() {
+            warnings.push(
+                "Semantic link decay is not implemented for this graph store/schema yet".into(),
+            );
+        }
 
         Ok(ForgetRun {
             run_id: uuid::Uuid::new_v4().to_string(),
@@ -141,6 +160,7 @@ impl ForgetEngine {
             deprecated_ids,
             protected_ids,
             links_decayed,
+            warnings,
         })
     }
 
@@ -148,6 +168,17 @@ impl ForgetEngine {
     pub async fn preview_forgetting(&self) -> Result<ForgetPreview> {
         let notes = self.vector_store.get_all().await?;
         let now = Utc::now();
+        let links_decayed = if self.config.enabled {
+            self.decay_semantic_links(&now).await?
+        } else {
+            Some(0)
+        };
+        let mut warnings = Vec::new();
+        if links_decayed.is_none() {
+            warnings.push(
+                "Semantic link decay is not implemented for this graph store/schema yet".into(),
+            );
+        }
 
         let mut candidates = Vec::new();
         let mut total_archived = 0;
@@ -155,7 +186,12 @@ impl ForgetEngine {
         let mut total_protected = 0;
 
         for note in &notes {
-            if !note.is_active() {
+            if !self.config.enabled
+                || matches!(
+                    note.status,
+                    NoteStatus::Archived | NoteStatus::Superseded { .. }
+                )
+            {
                 continue;
             }
 
@@ -174,11 +210,13 @@ impl ForgetEngine {
             } else if decay_score < self.config.archive_threshold as f64 {
                 total_archived += 1;
                 ForgetAction::Archive
-            } else if decay_score < (self.config.archive_threshold as f64 * 2.0) {
+            } else if note.status == NoteStatus::Active
+                && decay_score < (self.config.archive_threshold as f64 * 2.0)
+            {
                 total_deprecated += 1;
                 ForgetAction::Deprecate
             } else {
-                ForgetAction::Skip
+                continue;
             };
 
             candidates.push(ForgetCandidate {
@@ -189,6 +227,7 @@ impl ForgetEngine {
                 is_protected,
                 protection_reason,
                 action,
+                links_decayed,
             });
         }
 
@@ -198,44 +237,55 @@ impl ForgetEngine {
             total_archived,
             total_deprecated,
             total_protected,
+            links_decayed,
+            warnings,
         })
     }
 
     /// Compute an exponential decay score based on time since last access.
     /// Score of 1.0 = just accessed, approaches 0.0 over time.
     fn compute_decay_score(&self, note: &MemoryNote, now: &DateTime<Utc>) -> f64 {
-        let elapsed_days = (now.signed_duration_since(note.last_accessed_at)).num_seconds() as f64 / 86400.0;
+        let elapsed_days = (now
+            .signed_duration_since(note.last_accessed_at)
+            .num_milliseconds() as f64
+            / 86_400_000.0)
+            .max(0.0);
         let half_life = self.config.decay_half_life_days;
         if half_life <= 0.0 {
             return 1.0;
         }
         // Exponential decay: score = 0.5^(elapsed / half_life)
-        0.5_f64.powf(elapsed_days / half_life)
+        0.5_f64.powf(elapsed_days / half_life).clamp(0.0, 1.0)
     }
 
     /// Check if a note should be protected from forgetting.
-    /// Observed notes (user input) and profiles are protected by default.
+    /// Observed notes (user input), profiles, and episodes are protected by default.
     fn is_protected(&self, note: &MemoryNote) -> bool {
-        note.is_profile() || note.is_episode()
+        matches!(note.provenance, Provenance::Observed) || note.is_profile() || note.is_episode()
     }
 
     /// Human-readable reason why a note is protected.
     fn protection_reason(&self, note: &MemoryNote) -> String {
-        if note.is_profile() {
+        debug_assert!(self.is_protected(note));
+        if matches!(note.provenance, Provenance::Observed) {
+            "observed_note".into()
+        } else if note.is_profile() {
             "profile_note".into()
-        } else if note.is_episode() {
-            "episode_note".into()
         } else {
-            "unknown".into()
+            "episode_note".into()
         }
     }
 
-    /// Decay semantic link weights. Returns the number of links decayed.
-    async fn decay_semantic_links(&self, _now: &DateTime<Utc>) -> Result<usize> {
-        // Link decay requires typed/weighted link support from PR #3 (ACTIVATE).
+    /// Decay semantic link weights.
+    ///
+    /// Returns `Some(count)` when link decay is supported and ran, and `None`
+    /// when the current graph store/schema cannot represent weighted link decay yet.
+    async fn decay_semantic_links(&self, _now: &DateTime<Utc>) -> Result<Option<usize>> {
+        // TODO(forgetting-engine): Link decay requires typed/weighted link support from PR #3 (ACTIVATE).
         // When that PR merges, this will call graph_store.decay_link_weights().
-        // For now, return 0 — the infrastructure is wired but the store methods
-        // are default no-ops until the typed-link schema lands.
-        Ok(0)
+        // For now, return None so consumers can distinguish "not implemented"
+        // from "implemented and matched zero links".
+        let _ = &self.graph_store;
+        Ok(None)
     }
 }
