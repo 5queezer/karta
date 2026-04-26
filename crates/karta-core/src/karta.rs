@@ -305,7 +305,6 @@ impl Karta {
         })
     }
 
-
     // --- Rules ---
 
     pub async fn evaluate_rules(&self, ctx: &RuleContext) -> Result<RuleEvaluation> {
