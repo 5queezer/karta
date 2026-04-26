@@ -170,30 +170,12 @@ impl crate::store::GraphStore for SqliteGraphStore {
             CREATE INDEX IF NOT EXISTS idx_ep_links_from ON episode_links(from_episode_id);
             CREATE INDEX IF NOT EXISTS idx_ep_links_to ON episode_links(to_episode_id);
             CREATE INDEX IF NOT EXISTS idx_ep_links_entity ON episode_links(entity);
-
-            -- First-class contradictions (Issue #7)
-            CREATE TABLE IF NOT EXISTS contradictions (
-                id TEXT PRIMARY KEY,
-                entity TEXT NOT NULL,
-                scope_id TEXT NOT NULL,
-                source_note_ids_json TEXT NOT NULL,
-                description TEXT NOT NULL,
-                dream_run_id TEXT,
-                status TEXT NOT NULL DEFAULT 'open',
-                resolution_json TEXT,
-                resolved_at TEXT,
-                resolved_by TEXT,
-                ignore_reason TEXT,
-                created_at TEXT NOT NULL DEFAULT (datetime('now'))
-            );
-            CREATE INDEX IF NOT EXISTS idx_contradictions_entity ON contradictions(entity);
-            CREATE INDEX IF NOT EXISTS idx_contradictions_scope ON contradictions(scope_id);
-            CREATE INDEX IF NOT EXISTS idx_contradictions_status ON contradictions(status);
             ",
         )
         .map_err(|e| KartaError::GraphStore(e.to_string()))?;
 
         // Initialize schema_meta table and apply pending migrations
+        // (contradictions table is created by migration 001)
         migrate::init_and_migrate(&conn)?;
 
         Ok(())
@@ -919,20 +901,32 @@ impl crate::store::GraphStore for SqliteGraphStore {
         let resolution_json = serde_json::to_string(&resolution)
             .map_err(|e| KartaError::Serialization(e))?;
         let now = Utc::now().to_rfc3339();
-        conn.execute(
-            "UPDATE contradictions SET status = 'resolved', resolution_json = ?2, resolved_at = ?3, resolved_by = ?4 WHERE id = ?1",
+        let rows = conn.execute(
+            "UPDATE contradictions SET status = 'resolved', resolution_json = ?2, resolved_at = ?3, resolved_by = ?4 WHERE id = ?1 AND status = 'open'",
             rusqlite::params![id, resolution_json, now, resolved_by],
         ).map_err(|e| KartaError::GraphStore(e.to_string()))?;
+        if rows == 0 {
+            return Err(KartaError::GraphStore(format!(
+                "Contradiction {} not found or already resolved/ignored",
+                id
+            )));
+        }
         Ok(())
     }
 
     async fn ignore_contradiction(&self, id: &str, reason: &str) -> Result<()> {
         let conn = self.conn.lock().map_err(|e| KartaError::GraphStore(e.to_string()))?;
         let now = Utc::now().to_rfc3339();
-        conn.execute(
-            "UPDATE contradictions SET status = 'ignored', ignore_reason = ?2, resolved_at = ?3 WHERE id = ?1",
+        let rows = conn.execute(
+            "UPDATE contradictions SET status = 'ignored', ignore_reason = ?2, resolved_at = ?3 WHERE id = ?1 AND status = 'open'",
             rusqlite::params![id, reason, now],
         ).map_err(|e| KartaError::GraphStore(e.to_string()))?;
+        if rows == 0 {
+            return Err(KartaError::GraphStore(format!(
+                "Contradiction {} not found or already resolved/ignored",
+                id
+            )));
+        }
         Ok(())
     }
 }
@@ -947,7 +941,11 @@ fn parse_contradiction_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<crate::c
 
     let source_note_ids: Vec<String> = {
         let json: String = row.get(3)?;
-        serde_json::from_str(&json).unwrap_or_default()
+        serde_json::from_str(&json).map_err(|e| rusqlite::Error::FromSqlConversionFailure(
+            3,
+            rusqlite::types::Type::Text,
+            Box::new(e),
+        ))?
     };
 
     let resolution: Option<crate::contradiction::ContradictionResolution> = {

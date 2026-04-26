@@ -256,7 +256,7 @@ impl Karta {
         let graph_meta = self.graph_store.get_schema_meta().await;
         let graph_ok = graph_meta.is_ok();
 
-        let (schema_version, _applied, pending, warnings) = match graph_meta {
+        let (schema_version, applied, pending, warnings) = match graph_meta {
             Ok(meta) => (
                 meta.schema_version,
                 meta.applied_migrations,
@@ -287,6 +287,7 @@ impl Karta {
             vector_store_ok: vector_ok,
             graph_store_ok: graph_ok,
             schema_version: schema_version.to_string(),
+            applied_migrations: applied,
             pending_migrations: pending,
             warnings,
         })
@@ -310,8 +311,8 @@ impl Karta {
         self.graph_store.list_contradictions_for_entity(entity).await
     }
 
-    pub async fn resolve_contradiction(&self, id: &str, resolution: ContradictionResolution) -> Result<()> {
-        self.graph_store.resolve_contradiction(id, resolution, None).await
+    pub async fn resolve_contradiction(&self, id: &str, resolution: ContradictionResolution, resolved_by: Option<&str>) -> Result<()> {
+        self.graph_store.resolve_contradiction(id, resolution, resolved_by).await
     }
 
     pub async fn ignore_contradiction(&self, id: &str, reason: &str) -> Result<()> {
@@ -325,6 +326,7 @@ pub struct KartaHealth {
     pub vector_store_ok: bool,
     pub graph_store_ok: bool,
     pub schema_version: String,
+    pub applied_migrations: Vec<String>,
     pub pending_migrations: Vec<String>,
     pub warnings: Vec<String>,
 }

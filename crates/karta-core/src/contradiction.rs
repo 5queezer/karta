@@ -16,18 +16,13 @@ pub enum ContradictionResolution {
 }
 
 /// Lifecycle state of a contradiction.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum ContradictionStatus {
+    #[default]
     Open,
     Resolved,
     Ignored,
-}
-
-impl Default for ContradictionStatus {
-    fn default() -> Self {
-        ContradictionStatus::Open
-    }
 }
 
 /// A first-class contradiction between two or more notes.

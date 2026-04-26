@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 
-use crate::error::Result;
+use crate::error::{KartaError, Result};
 use crate::note::{AtomicFact, CrossEpisodeDigest, Episode, EpisodeDigest, ForesightSignal, MemoryNote};
 
 /// Stores note embeddings and metadata. Provides ANN similarity search.
@@ -151,10 +151,10 @@ pub trait GraphStore: Send + Sync {
 
     // --- Contradictions (Issue #7) ---
 
-    async fn upsert_contradiction(&self, _contradiction: &crate::contradiction::Contradiction) -> Result<()> { Ok(()) }
-    async fn get_contradiction(&self, _id: &str) -> Result<Option<crate::contradiction::Contradiction>> { Ok(None) }
-    async fn list_contradictions(&self, _scope_id: Option<&str>, _status: Option<crate::contradiction::ContradictionStatus>) -> Result<Vec<crate::contradiction::Contradiction>> { Ok(Vec::new()) }
-    async fn list_contradictions_for_entity(&self, _entity: &str) -> Result<Vec<crate::contradiction::Contradiction>> { Ok(Vec::new()) }
-    async fn resolve_contradiction(&self, _id: &str, _resolution: crate::contradiction::ContradictionResolution, _resolved_by: Option<&str>) -> Result<()> { Ok(()) }
-    async fn ignore_contradiction(&self, _id: &str, _reason: &str) -> Result<()> { Ok(()) }
+    async fn upsert_contradiction(&self, _contradiction: &crate::contradiction::Contradiction) -> Result<()> { Err(KartaError::GraphStore("contradictions not supported by this store".into())) }
+    async fn get_contradiction(&self, _id: &str) -> Result<Option<crate::contradiction::Contradiction>> { Err(KartaError::GraphStore("contradictions not supported by this store".into())) }
+    async fn list_contradictions(&self, _scope_id: Option<&str>, _status: Option<crate::contradiction::ContradictionStatus>) -> Result<Vec<crate::contradiction::Contradiction>> { Err(KartaError::GraphStore("contradictions not supported by this store".into())) }
+    async fn list_contradictions_for_entity(&self, _entity: &str) -> Result<Vec<crate::contradiction::Contradiction>> { Err(KartaError::GraphStore("contradictions not supported by this store".into())) }
+    async fn resolve_contradiction(&self, _id: &str, _resolution: crate::contradiction::ContradictionResolution, _resolved_by: Option<&str>) -> Result<()> { Err(KartaError::GraphStore("contradictions not supported by this store".into())) }
+    async fn ignore_contradiction(&self, _id: &str, _reason: &str) -> Result<()> { Err(KartaError::GraphStore("contradictions not supported by this store".into())) }
 }

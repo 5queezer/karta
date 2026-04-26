@@ -4,9 +4,6 @@ use rusqlite::Connection;
 
 use crate::error::{KartaError, Result};
 
-/// Current schema version. Increment this when adding new migrations.
-pub const CURRENT_SCHEMA_VERSION: u32 = 2;
-
 /// Tracks the current schema state of a Karta data directory.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SchemaMeta {
@@ -38,7 +35,7 @@ pub struct Migration {
 pub fn all_migrations() -> Vec<Migration> {
     vec![
         Migration {
-            id: "002_contradictions_table",
+            id: "001_contradictions_table",
             description: "Create contradictions table for first-class contradiction tracking",
             up_sql: "CREATE TABLE IF NOT EXISTS contradictions (
                 id TEXT PRIMARY KEY,
@@ -101,6 +98,9 @@ pub fn apply_migrations(conn: &Connection) -> Result<SchemaMeta> {
 
     let migrations = all_migrations();
 
+    // Accumulator lives outside the loop so each iteration appends to it
+    let mut applied = meta.applied_migrations.clone();
+
     for pending_id in &meta.pending_migrations {
         let migration = migrations.iter().find(|m| m.id == pending_id.as_str());
         let migration = match migration {
@@ -124,8 +124,7 @@ pub fn apply_migrations(conn: &Connection) -> Result<SchemaMeta> {
             )));
         }
 
-        // Update schema_meta to record this migration
-        let mut applied = meta.applied_migrations.clone();
+        // Record this migration in the accumulator
         applied.push(migration.id.to_string());
         let applied_json = serde_json::to_string(&applied)
             .map_err(|e| KartaError::Serialization(e))?;
