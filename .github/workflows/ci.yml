@@ -44,10 +44,7 @@ jobs:
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
 
-      # rustfmt + clippy -D warnings are intentionally lenient today — the
-      # tree has pre-existing style drift that will be cleaned up in a
-      # dedicated PR. For now, these run as informational checks so we at
-      # least surface regressions without blocking on the historical debt.
+      # rustfmt and clippy are strict CI gates; formatting or lint warnings fail the run.
       - name: rustfmt
         run: cargo fmt --all -- --check
 
@@ -64,6 +61,3 @@ jobs:
           # real Azure OpenAI + Jina credentials. CI never runs them. Only the
           # unit tests + mock-LLM integration tests execute here.
           KARTA_CI: "1"
-
-      - name: synthetic memory eval
-        run: cargo test -p karta-core --test synthetic_memory_eval

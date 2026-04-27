@@ -18,11 +18,15 @@ system could find because they were never explicitly stored.
 
 - **Self-organizing note graph** — notes are enriched with LLM-generated context, semantically linked, and retroactively evolved when new information arrives
 - **Dream engine** — 5 types of background inference: deduction, induction, abduction, consolidation, contradiction detection
+- **First-class contradictions** — structured `Contradiction` objects with lifecycle (open → resolved/ignored), per-entity and per-scope queries, source-note protection from forgetting
 - **Structured output with reasoning** — forces chain-of-thought before answers, enabling reliable abstention and contradiction flagging
 - **Cross-encoder reranking** — Jina AI reranker for precise relevance scoring and intelligent abstention
 - **Temporal awareness** — exponential decay scoring, foresight signals with validity windows
 - **Provenance tracking** — every note tagged as FACT or INFERRED with confidence scores
-- **Forgetting** — note lifecycle (Active → Deprecated → Superseded → Archived) with access-based decay
+- **Forgetting engine** — `Karta::run_forgetting()`/`Karta::preview_forgetting()`: archives stale low-activation notes using access-based exponential decay scoring with protected notes (profiles, episodes); lifecycle: Active → Deprecated → Superseded → Archived
+- **Procedural memory** — `RuleEngine` with safe `ProceduralRule` DSL (query/session/contradiction conditions → prompt/retrieval actions only), fire-count tracking, note-sourced rules protected from forgetting
+- **Evidence packets** — `AskResult` exposes an optional `EvidencePacket` slot for per-channel rank traces, fired rule IDs, contradiction IDs, and human-readable "why retrieved" explanations; current read paths return `evidence: None` until ACTIVATE populates it
+- **Deterministic extractors** — `Extractor` trait with Markdown (headings, links, code fences), JSON (recursive paths), YAML (key-value), and Cargo.toml (metadata, dependency edges) extractors that run before LLM extraction
 - **Embedded by default** — LanceDB + SQLite, zero infrastructure. `cargo add karta` and go.
 
 ## Quick Start
@@ -157,12 +161,17 @@ karta/
 # Run tests (mock LLM, no API keys needed)
 cargo test
 
+# Run synthetic memory evals (zero API keys, deterministic)
+cargo test -p karta-core --test synthetic_memory_eval
+
 # Run real eval (requires .env credentials)
 cargo test --test real_eval -- --ignored --nocapture
 
 # Run BEAM benchmark
 BEAM_DATASET_PATH=data/beam-100k.json cargo test --test beam_100k beam_100k_single -- --ignored --nocapture
 ```
+
+CI gates on every PR: `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo nextest run --workspace --no-fail-fast`.
 
 ## Documentation
 
