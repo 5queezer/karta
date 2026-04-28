@@ -149,7 +149,7 @@ karta/
 │   │   │   ├── store/       # LanceDB + SQLite implementations
 │   │   │   └── llm/         # Provider trait + OpenAI + structured output
 │   │   └── tests/           # Eval suites + BEAM/LOCOMO/LongMem harnesses
-│   └── karta-cli/           # CLI (planned)
+│   └── karta-cli/           # CLI for local automation and agent integrations
 ├── data/                    # Benchmark preprocessing scripts
 ├── Cargo.toml
 └── README.md
@@ -158,6 +158,11 @@ karta/
 ## Development
 
 ```bash
+# Use the CLI (requires LLM credentials for commands that write/search/ask)
+cargo run -p karta-cli -- --help
+cargo run -p karta-cli -- --json add-note --content "Sarah prefers Slack notifications"
+cargo run -p karta-cli -- --json search --query "Sarah notification preferences" --top-k 5
+
 # Run tests (mock LLM, no API keys needed)
 cargo test
 
