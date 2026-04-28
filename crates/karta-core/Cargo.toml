@@ -10,6 +10,7 @@ default = ["lance", "sqlite", "openai"]
 lance = ["dep:lancedb", "dep:arrow-array", "dep:arrow-schema"]
 sqlite = ["dep:rusqlite"]
 openai = ["dep:async-openai"]
+eval-harnesses = []
 
 [dependencies]
 # Async runtime
@@ -54,3 +55,36 @@ async-openai = { version = "0.27", optional = true }
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }
 uuid = { version = "1", features = ["v4"] }
+
+# These ignored benchmark/evaluation harnesses are useful locally, but very large
+# to compile/link in GitHub's default runners. Keep them out of default CI builds;
+# enable explicitly with `--features eval-harnesses` when running them.
+[[test]]
+name = "beam_100k"
+path = "tests/beam_100k.rs"
+required-features = ["eval-harnesses"]
+
+[[test]]
+name = "bench_beam"
+path = "tests/bench_beam.rs"
+required-features = ["eval-harnesses"]
+
+[[test]]
+name = "inspect"
+path = "tests/inspect.rs"
+required-features = ["eval-harnesses"]
+
+[[test]]
+name = "locomo"
+path = "tests/locomo.rs"
+required-features = ["eval-harnesses"]
+
+[[test]]
+name = "longmem"
+path = "tests/longmem.rs"
+required-features = ["eval-harnesses"]
+
+[[test]]
+name = "real_eval"
+path = "tests/real_eval.rs"
+required-features = ["eval-harnesses"]
