@@ -13,6 +13,11 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # GitHub's hosted Linux runners can trip rust-lld bus errors while linking
+  # several large test binaries in parallel. Keep CI linking serial and force
+  # lld to a single worker so failures stay about code, not runner memory.
+  CARGO_BUILD_JOBS: 1
+  RUSTFLAGS: -C link-arg=-Wl,--threads=1
 
 jobs:
   check:
