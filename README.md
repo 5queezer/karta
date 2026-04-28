@@ -178,6 +178,41 @@ BEAM_DATASET_PATH=data/beam-100k.json cargo test --test beam_100k beam_100k_sing
 
 CI gates on every PR: `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo nextest run --workspace --no-fail-fast`.
 
+## Pi Integration
+
+This repository includes a project-local pi extension at `.pi/extensions/karta.ts`.
+When you run pi from the repository root, the extension registers Karta memory tools
+backed by the local CLI:
+
+- `karta_add_note` — store durable memories
+- `karta_search` — semantic memory search
+- `karta_ask` — synthesized Q&A over memory
+- `karta_get_note` — retrieve a note by ID
+- `karta_note_count` — count stored notes
+- `karta_health` — check embedded store health
+- `karta_dream` — run background reasoning
+
+By default the extension shells out to `cargo run -q -p karta-cli -- --json ...`,
+so it works directly from a checkout. To use an installed binary instead:
+
+```bash
+cargo install --path crates/karta-cli
+export KARTA_BIN=karta
+pi
+```
+
+Useful environment variables:
+
+```bash
+export KARTA_DATA_DIR=.karta          # storage directory used by the CLI
+export KARTA_LANCE_URI=.karta/lance   # optional LanceDB URI override
+export KARTA_TIMEOUT_MS=120000        # extension command timeout
+```
+
+Memory policy instructions for pi live in `.pi/APPEND_SYSTEM.md`. The extension
+intentionally starts with explicit tools only; automatic recall/write should be
+added only after memory quality is validated.
+
 ## Documentation
 
 - **[`benchmarks/`](./benchmarks/)** — benchmark results, reproduction commands, experiment logs
