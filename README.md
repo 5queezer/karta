@@ -170,10 +170,10 @@ cargo test
 cargo test -p karta-core --test synthetic_memory_eval
 
 # Run real eval (requires .env credentials)
-cargo test --test real_eval -- --ignored --nocapture
+cargo test -p karta-core --features eval-harnesses --test real_eval -- --ignored --nocapture
 
 # Run BEAM benchmark
-BEAM_DATASET_PATH=data/beam-100k.json cargo test --test beam_100k beam_100k_single -- --ignored --nocapture
+BEAM_DATASET_PATH=data/beam-100k.json cargo test -p karta-core --features eval-harnesses --test beam_100k beam_100k_single -- --ignored --nocapture
 ```
 
 CI gates on every PR: `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo nextest run --workspace --no-fail-fast`.

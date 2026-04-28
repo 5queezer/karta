@@ -135,10 +135,17 @@ export default function (pi: ExtensionAPI) {
     parameters: Type.Object({
       content: Type.String({ description: "The durable memory content to store." }),
       session_id: Type.Optional(Type.String({ description: "Optional session/workspace grouping ID." })),
-      turn_index: Type.Optional(Type.Number({ description: "Optional source conversation turn index. Requires session_id." })),
+      turn_index: Type.Optional(Type.Integer({ minimum: 0, description: "Optional source conversation turn index. Requires session_id." })),
       source_timestamp: Type.Optional(Type.String({ description: "Optional RFC3339 source timestamp. Requires session_id." })),
     }),
     async execute(_toolCallId, params, signal) {
+      if ((params.turn_index !== undefined || params.source_timestamp) && !params.session_id) {
+        throw new Error("session_id is required when turn_index or source_timestamp is provided");
+      }
+      if (params.turn_index !== undefined && (!Number.isFinite(params.turn_index) || !Number.isInteger(params.turn_index) || params.turn_index < 0)) {
+        throw new Error("turn_index must be a non-negative integer");
+      }
+
       const args = ["add-note", "--content", params.content];
       if (params.session_id) args.push("--session-id", params.session_id);
       if (params.turn_index !== undefined) args.push("--turn-index", String(params.turn_index));
