@@ -487,6 +487,9 @@ impl WriteEngine {
             access_count: 0,
             access_history: Vec::new(),
             session_id: None,
+            scope_type: crate::note::default_scope_type(),
+            scope_id: crate::note::default_scope_id(),
+            source_ref: None,
         };
 
         self.vector_store.upsert(&note).await?;

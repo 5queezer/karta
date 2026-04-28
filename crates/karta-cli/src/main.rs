@@ -53,6 +53,18 @@ enum Commands {
         /// Optional source timestamp as RFC3339/ISO-8601.
         #[arg(long)]
         source_timestamp: Option<DateTime<Utc>>,
+
+        /// Optional memory scope type (for example: global, repo, workspace).
+        #[arg(long)]
+        scope_type: Option<String>,
+
+        /// Optional memory scope identifier (for repo scopes, prefer remote URL or canonical path).
+        #[arg(long)]
+        scope_id: Option<String>,
+
+        /// Optional source reference, such as a file path, issue URL, or conversation id.
+        #[arg(long)]
+        source_ref: Option<String>,
     },
 
     /// Search stored memories by semantic similarity.
@@ -198,20 +210,62 @@ async fn run(cli: Cli) -> Result<()> {
             session_id,
             turn_index,
             source_timestamp,
+            scope_type,
+            scope_id,
+            source_ref,
         } => {
-            let note = match (session_id.as_deref(), turn_index, source_timestamp) {
-                (Some(session_id), turn_index, source_timestamp)
+            let has_scope = scope_type.is_some() || scope_id.is_some() || source_ref.is_some();
+            let scope_type = scope_type.as_deref().unwrap_or("global");
+            let scope_id = scope_id.as_deref().unwrap_or("default");
+            let note = match (
+                session_id.as_deref(),
+                turn_index,
+                source_timestamp,
+                has_scope,
+            ) {
+                (Some(session_id), turn_index, source_timestamp, true)
+                    if turn_index.is_some() || source_timestamp.is_some() =>
+                {
+                    karta
+                        .add_note_with_metadata_scoped(
+                            &content,
+                            session_id,
+                            turn_index,
+                            source_timestamp,
+                            scope_type,
+                            scope_id,
+                            source_ref.as_deref(),
+                        )
+                        .await?
+                }
+                (Some(session_id), turn_index, source_timestamp, false)
                     if turn_index.is_some() || source_timestamp.is_some() =>
                 {
                     karta
                         .add_note_with_metadata(&content, session_id, turn_index, source_timestamp)
                         .await?
                 }
-                (Some(session_id), _, _) => {
+                (Some(session_id), _, _, true) => {
+                    karta
+                        .add_note_with_session_scoped(
+                            &content,
+                            session_id,
+                            scope_type,
+                            scope_id,
+                            source_ref.as_deref(),
+                        )
+                        .await?
+                }
+                (Some(session_id), _, _, false) => {
                     karta.add_note_with_session(&content, session_id).await?
                 }
-                (None, None, None) => karta.add_note(&content).await?,
-                (None, Some(_), _) | (None, _, Some(_)) => {
+                (None, None, None, true) => {
+                    karta
+                        .add_note_scoped(&content, scope_type, scope_id, source_ref.as_deref())
+                        .await?
+                }
+                (None, None, None, false) => karta.add_note(&content).await?,
+                (None, Some(_), _, _) | (None, _, Some(_), _) => {
                     anyhow::bail!("--turn-index and --source-timestamp require --session-id")
                 }
             };

@@ -64,6 +64,9 @@ impl LanceVectorStore {
             Field::new("access_count", DataType::Utf8, true),
             Field::new("access_history_json", DataType::Utf8, true),
             Field::new("session_id", DataType::Utf8, true),
+            Field::new("scope_type", DataType::Utf8, true),
+            Field::new("scope_id", DataType::Utf8, true),
+            Field::new("source_ref", DataType::Utf8, true),
             Field::new(
                 "vector",
                 DataType::FixedSizeList(
@@ -105,6 +108,15 @@ impl LanceVectorStore {
         if !existing_names.contains("session_id") {
             to_add.push(("session_id".into(), "CAST(NULL AS STRING)".into()));
         }
+        if !existing_names.contains("scope_type") {
+            to_add.push(("scope_type".into(), "CAST(NULL AS STRING)".into()));
+        }
+        if !existing_names.contains("scope_id") {
+            to_add.push(("scope_id".into(), "CAST(NULL AS STRING)".into()));
+        }
+        if !existing_names.contains("source_ref") {
+            to_add.push(("source_ref".into(), "CAST(NULL AS STRING)".into()));
+        }
         if to_add.is_empty() {
             return Ok(());
         }
@@ -114,7 +126,7 @@ impl LanceVectorStore {
             .await
             .map_err(|e| {
                 KartaError::VectorStore(format!(
-                    "ACTIVATE: failed to migrate notes table schema (access_count / access_history_json / session_id); refusing to continue so writes don't diverge from reader schema: {}",
+                    "failed to migrate notes table schema (access_count / access_history_json / session_id / scope fields); refusing to continue so writes don't diverge from reader schema: {}",
                     e
                 ))
             })?;
@@ -376,6 +388,7 @@ impl LanceVectorStore {
                 .collect::<Vec<_>>(),
         )?;
         let session_id_str = note.session_id.clone().unwrap_or_default();
+        let source_ref_str = note.source_ref.clone().unwrap_or_default();
 
         let batch = RecordBatch::try_new(
             Self::schema(),
@@ -396,6 +409,9 @@ impl LanceVectorStore {
                 Arc::new(StringArray::from(vec![access_count_str.as_str()])),
                 Arc::new(StringArray::from(vec![access_history_json.as_str()])),
                 Arc::new(StringArray::from(vec![session_id_str.as_str()])),
+                Arc::new(StringArray::from(vec![note.scope_type.as_str()])),
+                Arc::new(StringArray::from(vec![note.scope_id.as_str()])),
+                Arc::new(StringArray::from(vec![source_ref_str.as_str()])),
                 Arc::new(vector_array),
             ],
         )
@@ -479,6 +495,9 @@ impl LanceVectorStore {
         let access_count_strs = Self::get_str_opt(batch, "access_count");
         let access_history_jsons = Self::get_str_opt(batch, "access_history_json");
         let session_id_strs = Self::get_str_opt(batch, "session_id");
+        let scope_type_strs = Self::get_str_opt(batch, "scope_type");
+        let scope_id_strs = Self::get_str_opt(batch, "scope_id");
+        let source_ref_strs = Self::get_str_opt(batch, "source_ref");
 
         let vector_col = batch
             .column_by_name("vector")
@@ -536,6 +555,26 @@ impl LanceVectorStore {
                 .flatten()
                 .filter(|s| !s.is_empty())
                 .map(|s| s.to_string());
+            let scope_type = scope_type_strs
+                .get(i)
+                .copied()
+                .flatten()
+                .filter(|s| !s.is_empty())
+                .unwrap_or("global")
+                .to_string();
+            let scope_id = scope_id_strs
+                .get(i)
+                .copied()
+                .flatten()
+                .filter(|s| !s.is_empty())
+                .unwrap_or("default")
+                .to_string();
+            let source_ref = source_ref_strs
+                .get(i)
+                .copied()
+                .flatten()
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string());
 
             notes.push(MemoryNote {
                 id: ids.value(i).to_string(),
@@ -574,6 +613,9 @@ impl LanceVectorStore {
                 access_count,
                 access_history,
                 session_id,
+                scope_type,
+                scope_id,
+                source_ref,
             });
         }
 

@@ -52,6 +52,23 @@ pub struct MemoryNote {
     /// Session this note was written in — required for PAS sequential linkage.
     #[serde(default)]
     pub session_id: Option<String>,
+    /// Scope namespace used to keep memories from different projects/repos separate.
+    #[serde(default = "default_scope_type")]
+    pub scope_type: String,
+    /// Scope identifier within `scope_type` (for repos, prefer remote URL or canonical path).
+    #[serde(default = "default_scope_id")]
+    pub scope_id: String,
+    /// Optional human-readable source reference such as a file path, issue, or conversation id.
+    #[serde(default)]
+    pub source_ref: Option<String>,
+}
+
+pub fn default_scope_type() -> String {
+    "global".to_string()
+}
+
+pub fn default_scope_id() -> String {
+    "default".to_string()
 }
 
 /// Maximum stamps retained in `MemoryNote::access_history`. Keeps per-note
@@ -82,6 +99,9 @@ impl MemoryNote {
             access_count: 0,
             access_history: Vec::new(),
             session_id: None,
+            scope_type: default_scope_type(),
+            scope_id: default_scope_id(),
+            source_ref: None,
         }
     }
 
@@ -472,4 +492,40 @@ pub enum NoteStatus {
         by: String,
     },
     Archived,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn memory_note_deserializes_legacy_scope_defaults() {
+        let note: MemoryNote = serde_json::from_value(serde_json::json!({
+            "id": "note-1",
+            "content": "legacy",
+            "context": "",
+            "keywords": [],
+            "tags": [],
+            "links": [],
+            "created_at": "2026-04-28T00:00:00Z",
+            "updated_at": "2026-04-28T00:00:00Z",
+            "evolution_history": [],
+            "provenance": "Observed",
+            "confidence": 1.0
+        }))
+        .expect("legacy note should deserialize");
+
+        assert_eq!(note.scope_type, "global");
+        assert_eq!(note.scope_id, "default");
+        assert_eq!(note.source_ref, None);
+    }
+
+    #[test]
+    fn new_memory_note_uses_global_default_scope() {
+        let note = MemoryNote::new("remember this".to_string());
+
+        assert_eq!(note.scope_type, "global");
+        assert_eq!(note.scope_id, "default");
+        assert_eq!(note.source_ref, None);
+    }
 }
