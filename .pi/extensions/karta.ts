@@ -18,9 +18,11 @@ const KARTA_USAGE_GUIDELINES = [
 
 const AUTO_CONTEXT_DEFAULT_TOP_K = 5;
 const AUTO_CONTEXT_DEFAULT_MAX_CHARS = 4_000;
+const MAX_AUTO_CONTEXT_QUERY_CHARS = 16_000;
 
 const HARD_TOKEN_PATTERNS = [
   /`([^`]+)`/g,
+  /@[A-Za-z0-9_.-]+\/[A-Za-z0-9_.\/-]+/g,
   /[A-Za-z0-9_.-]+\/[A-Za-z0-9_./-]+/g,
   /\b[A-Z_][A-Z0-9_]{2,}\b/g,
   /\b[A-Z][A-Za-z0-9_]{2,}\b/g,
@@ -77,13 +79,23 @@ function extractHardTokens(text: string): string[] {
 
 function buildAutoContextQuery(prompt: string, cwd: string | undefined): string {
   const hardTokens = extractHardTokens(prompt);
-  return [
-    prompt,
+  const suffixParts = [
     cwd ? `cwd:${cwd}` : undefined,
     hardTokens.length ? `exact tokens: ${hardTokens.join(" ")}` : undefined,
-  ]
-    .filter(Boolean)
-    .join("\n");
+  ].filter(Boolean);
+  const suffix = suffixParts.length ? `\n${suffixParts.join("\n")}` : "";
+
+  if (prompt.length + suffix.length <= MAX_AUTO_CONTEXT_QUERY_CHARS) {
+    return `${prompt}${suffix}`;
+  }
+
+  const ellipsis = "\n…[query truncated]";
+  const promptBudget = Math.max(0, MAX_AUTO_CONTEXT_QUERY_CHARS - suffix.length - ellipsis.length);
+  if (promptBudget > 0) {
+    return `${prompt.slice(0, promptBudget).trimEnd()}${ellipsis}${suffix}`;
+  }
+
+  return truncateText(suffix.trimStart(), MAX_AUTO_CONTEXT_QUERY_CHARS);
 }
 
 function getStringField(value: unknown, field: string): string | undefined {
@@ -99,7 +111,12 @@ function getNumberField(value: unknown, field: string): number | undefined {
 }
 
 function formatAutoContext(result: JsonObject, maxChars: number): string | undefined {
-  const hits = Array.isArray(result.results) ? result.results : [];
+  const data = result.data && typeof result.data === "object" ? (result.data as JsonObject) : undefined;
+  const hits = Array.isArray(data?.results)
+    ? data.results
+    : Array.isArray(result.results)
+      ? result.results
+      : [];
   const blocks: string[] = [];
 
   for (const hit of hits) {
