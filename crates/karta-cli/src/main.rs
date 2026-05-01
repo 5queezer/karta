@@ -1,7 +1,11 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
-use karta_core::{Karta, config::KartaConfig, note::MemoryNote};
+use karta_core::{
+    Karta,
+    config::KartaConfig,
+    note::{MemoryNote, normalize_scope_id, normalize_scope_type, normalize_source_ref},
+};
 use serde::Serialize;
 use serde_json::json;
 
@@ -53,6 +57,18 @@ enum Commands {
         /// Optional source timestamp as RFC3339/ISO-8601.
         #[arg(long)]
         source_timestamp: Option<DateTime<Utc>>,
+
+        /// Optional memory scope type (for example: global, repo, workspace).
+        #[arg(long)]
+        scope_type: Option<String>,
+
+        /// Optional memory scope identifier (for repo scopes, prefer remote URL or canonical path).
+        #[arg(long)]
+        scope_id: Option<String>,
+
+        /// Optional source reference, such as a file path, issue URL, or conversation id.
+        #[arg(long)]
+        source_ref: Option<String>,
     },
 
     /// Search stored memories by semantic similarity.
@@ -198,20 +214,70 @@ async fn run(cli: Cli) -> Result<()> {
             session_id,
             turn_index,
             source_timestamp,
+            scope_type,
+            scope_id,
+            source_ref,
         } => {
-            let note = match (session_id.as_deref(), turn_index, source_timestamp) {
-                (Some(session_id), turn_index, source_timestamp)
+            let normalized_scope_type = normalize_scope_type(scope_type.as_deref());
+            let normalized_scope_id = normalize_scope_id(scope_id.as_deref());
+            let normalized_source_ref = normalize_source_ref(source_ref.as_deref());
+            let has_scope = scope_type.as_deref().is_some_and(|s| !s.trim().is_empty())
+                || scope_id.as_deref().is_some_and(|s| !s.trim().is_empty())
+                || normalized_source_ref.is_some();
+            let note = match (
+                session_id.as_deref(),
+                turn_index,
+                source_timestamp,
+                has_scope,
+            ) {
+                (Some(session_id), turn_index, source_timestamp, true)
+                    if turn_index.is_some() || source_timestamp.is_some() =>
+                {
+                    karta
+                        .add_note_with_metadata_scoped(
+                            &content,
+                            session_id,
+                            turn_index,
+                            source_timestamp,
+                            &normalized_scope_type,
+                            &normalized_scope_id,
+                            normalized_source_ref.as_deref(),
+                        )
+                        .await?
+                }
+                (Some(session_id), turn_index, source_timestamp, false)
                     if turn_index.is_some() || source_timestamp.is_some() =>
                 {
                     karta
                         .add_note_with_metadata(&content, session_id, turn_index, source_timestamp)
                         .await?
                 }
-                (Some(session_id), _, _) => {
+                (Some(session_id), _, _, true) => {
+                    karta
+                        .add_note_with_session_scoped(
+                            &content,
+                            session_id,
+                            &normalized_scope_type,
+                            &normalized_scope_id,
+                            normalized_source_ref.as_deref(),
+                        )
+                        .await?
+                }
+                (Some(session_id), _, _, false) => {
                     karta.add_note_with_session(&content, session_id).await?
                 }
-                (None, None, None) => karta.add_note(&content).await?,
-                (None, Some(_), _) | (None, _, Some(_)) => {
+                (None, None, None, true) => {
+                    karta
+                        .add_note_scoped(
+                            &content,
+                            &normalized_scope_type,
+                            &normalized_scope_id,
+                            normalized_source_ref.as_deref(),
+                        )
+                        .await?
+                }
+                (None, None, None, false) => karta.add_note(&content).await?,
+                (None, Some(_), _, _) | (None, _, Some(_), _) => {
                     anyhow::bail!("--turn-index and --source-timestamp require --session-id")
                 }
             };

@@ -6,7 +6,10 @@ use rmcp::{
 };
 use serde::Deserialize;
 
-use karta_core::Karta;
+use karta_core::{
+    Karta,
+    note::{normalize_scope_id, normalize_scope_type, normalize_source_ref},
+};
 
 // -- Tool parameter types --
 
@@ -17,6 +20,15 @@ pub struct AddNoteParams {
     /// Optional session ID for grouping related notes
     #[serde(default)]
     pub session_id: Option<String>,
+    /// Optional memory scope type (for example: global, repo, workspace)
+    #[serde(default)]
+    pub scope_type: Option<String>,
+    /// Optional memory scope identifier
+    #[serde(default)]
+    pub scope_id: Option<String>,
+    /// Optional source reference, such as a file path, issue URL, or conversation id
+    #[serde(default)]
+    pub source_ref: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -99,12 +111,46 @@ impl KartaService {
         &self,
         Parameters(params): Parameters<AddNoteParams>,
     ) -> Result<CallToolResult, McpError> {
-        let result = if let Some(session_id) = &params.session_id {
-            self.karta
-                .add_note_with_session(&params.content, session_id)
-                .await
-        } else {
-            self.karta.add_note(&params.content).await
+        let scope_type = normalize_scope_type(params.scope_type.as_deref());
+        let scope_id = normalize_scope_id(params.scope_id.as_deref());
+        let source_ref = normalize_source_ref(params.source_ref.as_deref());
+        let has_scope = params
+            .scope_type
+            .as_deref()
+            .is_some_and(|s| !s.trim().is_empty())
+            || params
+                .scope_id
+                .as_deref()
+                .is_some_and(|s| !s.trim().is_empty())
+            || source_ref.is_some();
+        let result = match (params.session_id.as_deref(), has_scope) {
+            (Some(session_id), true) => {
+                self.karta
+                    .add_note_with_session_scoped(
+                        &params.content,
+                        session_id,
+                        &scope_type,
+                        &scope_id,
+                        source_ref.as_deref(),
+                    )
+                    .await
+            }
+            (Some(session_id), false) => {
+                self.karta
+                    .add_note_with_session(&params.content, session_id)
+                    .await
+            }
+            (None, true) => {
+                self.karta
+                    .add_note_scoped(
+                        &params.content,
+                        &scope_type,
+                        &scope_id,
+                        source_ref.as_deref(),
+                    )
+                    .await
+            }
+            (None, false) => self.karta.add_note(&params.content).await,
         };
 
         match result {
@@ -117,6 +163,9 @@ impl KartaService {
                     "tags": note.tags,
                     "links": note.links,
                     "confidence": note.confidence,
+                    "scope_type": note.scope_type,
+                    "scope_id": note.scope_id,
+                    "source_ref": note.source_ref,
                     "created_at": note.created_at.to_rfc3339(),
                 });
                 Ok(CallToolResult::success(vec![Content::text(

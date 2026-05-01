@@ -173,6 +173,33 @@ impl Karta {
             .await
     }
 
+    /// Add a session-linked note with explicit memory scope metadata.
+    pub async fn add_note_with_session_scoped(
+        &self,
+        content: &str,
+        session_id: &str,
+        scope_type: &str,
+        scope_id: &str,
+        source_ref: Option<&str>,
+    ) -> Result<MemoryNote> {
+        self.write_engine
+            .add_note_with_session_scoped(content, session_id, scope_type, scope_id, source_ref)
+            .await
+    }
+
+    /// Add a note with explicit memory scope metadata.
+    pub async fn add_note_scoped(
+        &self,
+        content: &str,
+        scope_type: &str,
+        scope_id: &str,
+        source_ref: Option<&str>,
+    ) -> Result<MemoryNote> {
+        self.write_engine
+            .add_note_scoped(content, scope_type, scope_id, source_ref)
+            .await
+    }
+
     /// Add a note with session context and optional temporal metadata.
     /// `turn_index`: position of this message within its conversation (0-indexed).
     /// `source_timestamp`: original timestamp from source data (distinct from ingestion time).
@@ -186,6 +213,32 @@ impl Karta {
         let mut note = self
             .write_engine
             .add_note_with_session(content, session_id)
+            .await?;
+
+        if turn_index.is_some() || source_timestamp.is_some() {
+            note.turn_index = turn_index;
+            note.source_timestamp = source_timestamp;
+            self.vector_store.upsert(&note).await?;
+        }
+
+        Ok(note)
+    }
+
+    /// Add a note with session, temporal metadata, and explicit scope metadata.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn add_note_with_metadata_scoped(
+        &self,
+        content: &str,
+        session_id: &str,
+        turn_index: Option<u32>,
+        source_timestamp: Option<DateTime<Utc>>,
+        scope_type: &str,
+        scope_id: &str,
+        source_ref: Option<&str>,
+    ) -> Result<MemoryNote> {
+        let mut note = self
+            .write_engine
+            .add_note_with_session_scoped(content, session_id, scope_type, scope_id, source_ref)
             .await?;
 
         if turn_index.is_some() || source_timestamp.is_some() {
