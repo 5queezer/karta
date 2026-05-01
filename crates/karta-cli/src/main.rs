@@ -1,7 +1,11 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
-use karta_core::{Karta, config::KartaConfig, note::MemoryNote};
+use karta_core::{
+    Karta,
+    config::KartaConfig,
+    note::{MemoryNote, normalize_scope_id, normalize_scope_type, normalize_source_ref},
+};
 use serde::Serialize;
 use serde_json::json;
 
@@ -214,9 +218,12 @@ async fn run(cli: Cli) -> Result<()> {
             scope_id,
             source_ref,
         } => {
-            let has_scope = scope_type.is_some() || scope_id.is_some() || source_ref.is_some();
-            let scope_type = scope_type.as_deref().unwrap_or("global");
-            let scope_id = scope_id.as_deref().unwrap_or("default");
+            let normalized_scope_type = normalize_scope_type(scope_type.as_deref());
+            let normalized_scope_id = normalize_scope_id(scope_id.as_deref());
+            let normalized_source_ref = normalize_source_ref(source_ref.as_deref());
+            let has_scope = scope_type.as_deref().is_some_and(|s| !s.trim().is_empty())
+                || scope_id.as_deref().is_some_and(|s| !s.trim().is_empty())
+                || normalized_source_ref.is_some();
             let note = match (
                 session_id.as_deref(),
                 turn_index,
@@ -232,9 +239,9 @@ async fn run(cli: Cli) -> Result<()> {
                             session_id,
                             turn_index,
                             source_timestamp,
-                            scope_type,
-                            scope_id,
-                            source_ref.as_deref(),
+                            &normalized_scope_type,
+                            &normalized_scope_id,
+                            normalized_source_ref.as_deref(),
                         )
                         .await?
                 }
@@ -250,9 +257,9 @@ async fn run(cli: Cli) -> Result<()> {
                         .add_note_with_session_scoped(
                             &content,
                             session_id,
-                            scope_type,
-                            scope_id,
-                            source_ref.as_deref(),
+                            &normalized_scope_type,
+                            &normalized_scope_id,
+                            normalized_source_ref.as_deref(),
                         )
                         .await?
                 }
@@ -261,7 +268,12 @@ async fn run(cli: Cli) -> Result<()> {
                 }
                 (None, None, None, true) => {
                     karta
-                        .add_note_scoped(&content, scope_type, scope_id, source_ref.as_deref())
+                        .add_note_scoped(
+                            &content,
+                            &normalized_scope_type,
+                            &normalized_scope_id,
+                            normalized_source_ref.as_deref(),
+                        )
                         .await?
                 }
                 (None, None, None, false) => karta.add_note(&content).await?,

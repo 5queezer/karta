@@ -14,7 +14,10 @@ use lancedb::{
 use tokio::sync::RwLock;
 
 use crate::error::{KartaError, Result};
-use crate::note::{ACCESS_HISTORY_CAP, MemoryNote, NoteStatus, Provenance};
+use crate::note::{
+    ACCESS_HISTORY_CAP, DEFAULT_SCOPE_ID, DEFAULT_SCOPE_TYPE, MemoryNote, NoteStatus, Provenance,
+    default_scope_id, default_scope_type,
+};
 
 const TABLE_NAME: &str = "notes";
 const FACTS_TABLE_NAME: &str = "atomic_facts";
@@ -109,10 +112,16 @@ impl LanceVectorStore {
             to_add.push(("session_id".into(), "CAST(NULL AS STRING)".into()));
         }
         if !existing_names.contains("scope_type") {
-            to_add.push(("scope_type".into(), "CAST(NULL AS STRING)".into()));
+            to_add.push((
+                "scope_type".into(),
+                format!("CAST('{DEFAULT_SCOPE_TYPE}' AS STRING)"),
+            ));
         }
         if !existing_names.contains("scope_id") {
-            to_add.push(("scope_id".into(), "CAST(NULL AS STRING)".into()));
+            to_add.push((
+                "scope_id".into(),
+                format!("CAST('{DEFAULT_SCOPE_ID}' AS STRING)"),
+            ));
         }
         if !existing_names.contains("source_ref") {
             to_add.push(("source_ref".into(), "CAST(NULL AS STRING)".into()));
@@ -388,7 +397,6 @@ impl LanceVectorStore {
                 .collect::<Vec<_>>(),
         )?;
         let session_id_str = note.session_id.clone().unwrap_or_default();
-        let source_ref_str = note.source_ref.clone().unwrap_or_default();
 
         let batch = RecordBatch::try_new(
             Self::schema(),
@@ -411,7 +419,7 @@ impl LanceVectorStore {
                 Arc::new(StringArray::from(vec![session_id_str.as_str()])),
                 Arc::new(StringArray::from(vec![note.scope_type.as_str()])),
                 Arc::new(StringArray::from(vec![note.scope_id.as_str()])),
-                Arc::new(StringArray::from(vec![source_ref_str.as_str()])),
+                Arc::new(StringArray::from(vec![note.source_ref.as_deref()])),
                 Arc::new(vector_array),
             ],
         )
@@ -560,15 +568,15 @@ impl LanceVectorStore {
                 .copied()
                 .flatten()
                 .filter(|s| !s.is_empty())
-                .unwrap_or("global")
-                .to_string();
+                .map(str::to_string)
+                .unwrap_or_else(default_scope_type);
             let scope_id = scope_id_strs
                 .get(i)
                 .copied()
                 .flatten()
                 .filter(|s| !s.is_empty())
-                .unwrap_or("default")
-                .to_string();
+                .map(str::to_string)
+                .unwrap_or_else(default_scope_id);
             let source_ref = source_ref_strs
                 .get(i)
                 .copied()
@@ -837,5 +845,141 @@ impl crate::store::VectorStore for LanceVectorStore {
         }
         facts.sort_by_key(|f| f.ordinal);
         Ok(facts)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::VectorStore;
+    use arrow_array::FixedSizeListArray;
+
+    fn temp_data_dir(name: &str) -> String {
+        let dir = std::env::temp_dir().join(format!("karta-{name}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("temp dir should be created");
+        dir.to_string_lossy().to_string()
+    }
+
+    #[tokio::test]
+    async fn lance_round_trips_scope_fields_and_null_source_ref() {
+        let dir = temp_data_dir("scope-roundtrip");
+        let store = LanceVectorStore::new(&dir).await.unwrap();
+
+        let mut scoped = MemoryNote::new("scoped note".to_string());
+        scoped.embedding = vec![0.0; EMBEDDING_DIM];
+        scoped.scope_type = "repo".to_string();
+        scoped.scope_id = "git@github.com:5queezer/karta.git".to_string();
+        scoped.source_ref = Some("crates/karta-core/src/store/lance.rs".to_string());
+        store.upsert(&scoped).await.unwrap();
+
+        let got = store.get(&scoped.id).await.unwrap().unwrap();
+        assert_eq!(got.scope_type, "repo");
+        assert_eq!(got.scope_id, "git@github.com:5queezer/karta.git");
+        assert_eq!(
+            got.source_ref.as_deref(),
+            Some("crates/karta-core/src/store/lance.rs")
+        );
+
+        let mut no_source = MemoryNote::new("no source".to_string());
+        no_source.embedding = vec![0.0; EMBEDDING_DIM];
+        no_source.source_ref = None;
+        store.upsert(&no_source).await.unwrap();
+
+        let got = store.get(&no_source.id).await.unwrap().unwrap();
+        assert_eq!(got.source_ref, None);
+    }
+
+    #[tokio::test]
+    async fn lance_migrates_legacy_scope_columns_to_queryable_defaults() {
+        let dir = temp_data_dir("scope-migration");
+        let uri = format!("{dir}/lance");
+        std::fs::create_dir_all(&uri).unwrap();
+        let conn = connect(&uri).execute().await.unwrap();
+
+        let legacy_schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("content", DataType::Utf8, false),
+            Field::new("context", DataType::Utf8, false),
+            Field::new("keywords_json", DataType::Utf8, false),
+            Field::new("tags_json", DataType::Utf8, false),
+            Field::new("provenance_json", DataType::Utf8, false),
+            Field::new("confidence", DataType::Float32, false),
+            Field::new("created_at", DataType::Utf8, false),
+            Field::new("updated_at", DataType::Utf8, false),
+            Field::new("status_json", DataType::Utf8, true),
+            Field::new("last_accessed_at", DataType::Utf8, true),
+            Field::new("turn_index", DataType::Utf8, true),
+            Field::new("source_timestamp", DataType::Utf8, true),
+            Field::new("access_count", DataType::Utf8, true),
+            Field::new("access_history_json", DataType::Utf8, true),
+            Field::new("session_id", DataType::Utf8, true),
+            Field::new(
+                "vector",
+                DataType::FixedSizeList(
+                    Arc::new(Field::new("item", DataType::Float32, true)),
+                    EMBEDDING_DIM as i32,
+                ),
+                false,
+            ),
+        ]));
+        let now = Utc::now().to_rfc3339();
+        let vector_array = FixedSizeListArray::try_new(
+            Arc::new(Field::new("item", DataType::Float32, true)),
+            EMBEDDING_DIM as i32,
+            Arc::new(Float32Array::from(vec![0.0; EMBEDDING_DIM])),
+            None,
+        )
+        .unwrap();
+        let batch = RecordBatch::try_new(
+            legacy_schema.clone(),
+            vec![
+                Arc::new(StringArray::from(vec!["legacy-note"])),
+                Arc::new(StringArray::from(vec!["legacy content"])),
+                Arc::new(StringArray::from(vec![""])),
+                Arc::new(StringArray::from(vec!["[]"])),
+                Arc::new(StringArray::from(vec!["[]"])),
+                Arc::new(StringArray::from(vec!["\"Observed\""])),
+                Arc::new(Float32Array::from(vec![1.0])),
+                Arc::new(StringArray::from(vec![now.as_str()])),
+                Arc::new(StringArray::from(vec![now.as_str()])),
+                Arc::new(StringArray::from(vec!["\"Active\""])),
+                Arc::new(StringArray::from(vec![now.as_str()])),
+                Arc::new(StringArray::from(vec![""])),
+                Arc::new(StringArray::from(vec![""])),
+                Arc::new(StringArray::from(vec!["0"])),
+                Arc::new(StringArray::from(vec!["[]"])),
+                Arc::new(StringArray::from(vec![""])),
+                Arc::new(vector_array),
+            ],
+        )
+        .unwrap();
+        let reader = LanceVectorStore::make_reader(vec![batch], legacy_schema);
+        conn.create_table(TABLE_NAME, reader)
+            .execute()
+            .await
+            .unwrap();
+
+        let store = LanceVectorStore::new(&dir).await.unwrap();
+        let note = store.get("legacy-note").await.unwrap().unwrap();
+        assert_eq!(note.scope_type, DEFAULT_SCOPE_TYPE);
+        assert_eq!(note.scope_id, DEFAULT_SCOPE_ID);
+        assert_eq!(note.source_ref, None);
+
+        let table = store.get_table().await.unwrap();
+        let results = table
+            .query()
+            .only_if(format!(
+                "scope_type = '{DEFAULT_SCOPE_TYPE}' AND scope_id = '{DEFAULT_SCOPE_ID}'"
+            ))
+            .execute()
+            .await
+            .unwrap();
+        let rows: usize = LanceVectorStore::collect_batches(results)
+            .await
+            .unwrap()
+            .iter()
+            .map(RecordBatch::num_rows)
+            .sum();
+        assert_eq!(rows, 1);
     }
 }

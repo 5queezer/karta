@@ -6,7 +6,10 @@ use rmcp::{
 };
 use serde::Deserialize;
 
-use karta_core::Karta;
+use karta_core::{
+    Karta,
+    note::{normalize_scope_id, normalize_scope_type, normalize_source_ref},
+};
 
 // -- Tool parameter types --
 
@@ -108,19 +111,27 @@ impl KartaService {
         &self,
         Parameters(params): Parameters<AddNoteParams>,
     ) -> Result<CallToolResult, McpError> {
-        let has_scope =
-            params.scope_type.is_some() || params.scope_id.is_some() || params.source_ref.is_some();
-        let scope_type = params.scope_type.as_deref().unwrap_or("global");
-        let scope_id = params.scope_id.as_deref().unwrap_or("default");
+        let scope_type = normalize_scope_type(params.scope_type.as_deref());
+        let scope_id = normalize_scope_id(params.scope_id.as_deref());
+        let source_ref = normalize_source_ref(params.source_ref.as_deref());
+        let has_scope = params
+            .scope_type
+            .as_deref()
+            .is_some_and(|s| !s.trim().is_empty())
+            || params
+                .scope_id
+                .as_deref()
+                .is_some_and(|s| !s.trim().is_empty())
+            || source_ref.is_some();
         let result = match (params.session_id.as_deref(), has_scope) {
             (Some(session_id), true) => {
                 self.karta
                     .add_note_with_session_scoped(
                         &params.content,
                         session_id,
-                        scope_type,
-                        scope_id,
-                        params.source_ref.as_deref(),
+                        &scope_type,
+                        &scope_id,
+                        source_ref.as_deref(),
                     )
                     .await
             }
@@ -133,9 +144,9 @@ impl KartaService {
                 self.karta
                     .add_note_scoped(
                         &params.content,
-                        scope_type,
-                        scope_id,
-                        params.source_ref.as_deref(),
+                        &scope_type,
+                        &scope_id,
+                        source_ref.as_deref(),
                     )
                     .await
             }

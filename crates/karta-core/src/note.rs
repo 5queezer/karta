@@ -63,12 +63,38 @@ pub struct MemoryNote {
     pub source_ref: Option<String>,
 }
 
+pub const DEFAULT_SCOPE_TYPE: &str = "global";
+pub const DEFAULT_SCOPE_ID: &str = "default";
+
 pub fn default_scope_type() -> String {
-    "global".to_string()
+    DEFAULT_SCOPE_TYPE.to_string()
 }
 
 pub fn default_scope_id() -> String {
-    "default".to_string()
+    DEFAULT_SCOPE_ID.to_string()
+}
+
+pub fn normalize_scope_type(value: Option<&str>) -> String {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(default_scope_type)
+}
+
+pub fn normalize_scope_id(value: Option<&str>) -> String {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(default_scope_id)
+}
+
+pub fn normalize_source_ref(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
 }
 
 /// Maximum stamps retained in `MemoryNote::access_history`. Keeps per-note
@@ -527,5 +553,18 @@ mod tests {
         assert_eq!(note.scope_type, "global");
         assert_eq!(note.scope_id, "default");
         assert_eq!(note.source_ref, None);
+    }
+
+    #[test]
+    fn scope_input_normalization_trims_and_defaults_empty_values() {
+        assert_eq!(normalize_scope_type(Some(" repo ")), "repo");
+        assert_eq!(normalize_scope_type(Some("   ")), "global");
+        assert_eq!(normalize_scope_id(Some(" project-1 ")), "project-1");
+        assert_eq!(normalize_scope_id(Some("")), "default");
+        assert_eq!(
+            normalize_source_ref(Some(" file.rs ")).as_deref(),
+            Some("file.rs")
+        );
+        assert_eq!(normalize_source_ref(Some("   ")), None);
     }
 }

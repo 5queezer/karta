@@ -100,6 +100,25 @@ impl WriteEngine {
     }
 
     pub async fn add_note(&self, content: &str) -> Result<MemoryNote> {
+        self.add_note_scoped(
+            content,
+            crate::note::DEFAULT_SCOPE_TYPE,
+            crate::note::DEFAULT_SCOPE_ID,
+            None,
+        )
+        .await
+    }
+
+    pub async fn add_note_scoped(
+        &self,
+        content: &str,
+        scope_type: &str,
+        scope_id: &str,
+        source_ref: Option<&str>,
+    ) -> Result<MemoryNote> {
+        let scope_type = crate::note::normalize_scope_type(Some(scope_type));
+        let scope_id = crate::note::normalize_scope_id(Some(scope_id));
+        let source_ref = crate::note::normalize_source_ref(source_ref);
         let preview_end = {
             let max = 60;
             let mut end = content.len().min(max);
@@ -120,6 +139,9 @@ impl WriteEngine {
 
         // 2. Create the note
         let mut note = MemoryNote::new(content.to_string());
+        note.scope_type = scope_type;
+        note.scope_id = scope_id;
+        note.source_ref = source_ref;
         note.context = attrs.context;
         note.keywords = attrs.keywords;
         note.tags = attrs.tags;
@@ -285,11 +307,8 @@ impl WriteEngine {
         content: &str,
         session_id: &str,
     ) -> Result<MemoryNote> {
-        // First, add the note normally
         let mut note = self.add_note(content).await?;
 
-        // Stamp session_id + emit the "follows" edge from the previous
-        // session tail so PAS can walk the sequential chain later.
         self.emit_sequential_link(session_id, &mut note).await?;
         self.vector_store.upsert(&note).await?;
 
@@ -297,6 +316,42 @@ impl WriteEngine {
             return Ok(note);
         }
 
+        self.update_episode_for_note(content, session_id, &note)
+            .await?;
+        Ok(note)
+    }
+
+    /// Add a note within a session context with explicit scope metadata.
+    pub async fn add_note_with_session_scoped(
+        &self,
+        content: &str,
+        session_id: &str,
+        scope_type: &str,
+        scope_id: &str,
+        source_ref: Option<&str>,
+    ) -> Result<MemoryNote> {
+        let mut note = self
+            .add_note_scoped(content, scope_type, scope_id, source_ref)
+            .await?;
+
+        self.emit_sequential_link(session_id, &mut note).await?;
+        self.vector_store.upsert(&note).await?;
+
+        if !self.episode_config.enabled {
+            return Ok(note);
+        }
+
+        self.update_episode_for_note(content, session_id, &note)
+            .await?;
+        Ok(note)
+    }
+
+    async fn update_episode_for_note(
+        &self,
+        content: &str,
+        session_id: &str,
+        note: &MemoryNote,
+    ) -> Result<()> {
         // Get existing episodes for this session
         let episodes = self
             .graph_store
@@ -392,7 +447,7 @@ impl WriteEngine {
             debug!(episode_id = %ep.id, notes = all_note_ids.len(), "Extended episode");
         }
 
-        Ok(note)
+        Ok(())
     }
 
     async fn detect_episode_boundary(

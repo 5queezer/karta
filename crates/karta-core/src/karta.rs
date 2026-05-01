@@ -182,15 +182,9 @@ impl Karta {
         scope_id: &str,
         source_ref: Option<&str>,
     ) -> Result<MemoryNote> {
-        let mut note = self
-            .write_engine
-            .add_note_with_session(content, session_id)
-            .await?;
-        note.scope_type = scope_type.to_string();
-        note.scope_id = scope_id.to_string();
-        note.source_ref = source_ref.map(str::to_string);
-        self.vector_store.upsert(&note).await?;
-        Ok(note)
+        self.write_engine
+            .add_note_with_session_scoped(content, session_id, scope_type, scope_id, source_ref)
+            .await
     }
 
     /// Add a note with explicit memory scope metadata.
@@ -201,12 +195,9 @@ impl Karta {
         scope_id: &str,
         source_ref: Option<&str>,
     ) -> Result<MemoryNote> {
-        let mut note = self.write_engine.add_note(content).await?;
-        note.scope_type = scope_type.to_string();
-        note.scope_id = scope_id.to_string();
-        note.source_ref = source_ref.map(str::to_string);
-        self.vector_store.upsert(&note).await?;
-        Ok(note)
+        self.write_engine
+            .add_note_scoped(content, scope_type, scope_id, source_ref)
+            .await
     }
 
     /// Add a note with session context and optional temporal metadata.
@@ -246,12 +237,16 @@ impl Karta {
         source_ref: Option<&str>,
     ) -> Result<MemoryNote> {
         let mut note = self
-            .add_note_with_metadata(content, session_id, turn_index, source_timestamp)
+            .write_engine
+            .add_note_with_session_scoped(content, session_id, scope_type, scope_id, source_ref)
             .await?;
-        note.scope_type = scope_type.to_string();
-        note.scope_id = scope_id.to_string();
-        note.source_ref = source_ref.map(str::to_string);
-        self.vector_store.upsert(&note).await?;
+
+        if turn_index.is_some() || source_timestamp.is_some() {
+            note.turn_index = turn_index;
+            note.source_timestamp = source_timestamp;
+            self.vector_store.upsert(&note).await?;
+        }
+
         Ok(note)
     }
 
