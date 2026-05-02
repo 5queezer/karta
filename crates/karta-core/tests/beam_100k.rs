@@ -294,17 +294,19 @@ fn apply_config_env(config: &mut KartaConfig) {
     config.write.extract_atomic_facts = env_bool("K_EXTRACT_FACTS", true);
     config.read.fact_retrieval_enabled = env_bool("K_FACT_RETRIEVAL", true);
     config.read.fact_match_boost = env_f32("K_FACT_BOOST", 0.1);
+    config.read.activate.enabled = env_bool("KARTA_ACTIVATE_ENABLED", true);
 
     let exp = std::env::var("K_EXPERIMENT").unwrap_or_else(|_| "default".to_string());
     println!(
-        "  Config [{}]: episode={}, ep_retrieval={}, graph={}, foresight={}, reranker={}, abstention_thresh={}",
+        "  Config [{}]: episode={}, ep_retrieval={}, graph={}, foresight={}, reranker={}, abstention_thresh={}, activate={}",
         exp,
         config.episode.enabled,
         config.read.episode_retrieval_enabled,
         config.read.graph_weight,
         config.read.foresight_boost,
         config.reranker.enabled,
-        config.reranker.abstention_threshold
+        config.reranker.abstention_threshold,
+        config.read.activate.enabled
     );
 }
 
@@ -519,7 +521,7 @@ async fn eval_conversation(
     let query_concurrency: usize = std::env::var("BEAM_QUERY_CONCURRENCY")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(3);
+        .unwrap_or(1);
     let semaphore = Arc::new(tokio::sync::Semaphore::new(query_concurrency));
     let mut ask_handles = Vec::new();
 
