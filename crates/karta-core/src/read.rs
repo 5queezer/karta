@@ -269,6 +269,14 @@ fn classify_query_keywords(query: &str) -> QueryMode {
     QueryMode::Standard
 }
 
+fn sort_search_results_by_score(results: &mut [SearchResult]) {
+    results.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+}
+
 /// Handles the read path: search, graph traversal, reranking, synthesis.
 pub struct ReadEngine {
     vector_store: Arc<dyn VectorStore>,
@@ -877,6 +885,7 @@ impl ReadEngine {
         results.extend(episode_results);
         results.extend(fact_expanded);
         results.extend(flat_results);
+        sort_search_results_by_score(&mut results);
 
         info!(
             results = results.len(),
@@ -1518,5 +1527,33 @@ mod tests {
             classify_query_keywords("What tools am I using?"),
             QueryMode::Existence,
         );
+    }
+
+    #[test]
+    fn search_results_are_sorted_by_score_descending() {
+        let mut results = vec![
+            SearchResult {
+                note: MemoryNote::new("low".to_string()),
+                score: 0.2,
+                linked_notes: Vec::new(),
+            },
+            SearchResult {
+                note: MemoryNote::new("high".to_string()),
+                score: 0.9,
+                linked_notes: Vec::new(),
+            },
+            SearchResult {
+                note: MemoryNote::new("mid".to_string()),
+                score: 0.5,
+                linked_notes: Vec::new(),
+            },
+        ];
+
+        sort_search_results_by_score(&mut results);
+
+        let scores: Vec<f32> = results.iter().map(|r| r.score).collect();
+        assert_eq!(scores, vec![0.9, 0.5, 0.2]);
+        let contents: Vec<&str> = results.iter().map(|r| r.note.content.as_str()).collect();
+        assert_eq!(contents, vec!["high", "mid", "low"]);
     }
 }
