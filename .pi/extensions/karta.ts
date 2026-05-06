@@ -31,18 +31,29 @@ const HARD_TOKEN_PATTERNS = [
 ];
 
 type JsonObject = Record<string, unknown>;
-type ExecFileFailure = Error & { stdout?: string; stderr?: string; code?: unknown; signal?: unknown };
+type ExecFileFailure = Error & {
+  stdout?: string;
+  stderr?: string;
+  code?: unknown;
+  signal?: unknown;
+};
 
-function timeoutMs(): number {
-  const raw = process.env.KARTA_TIMEOUT_MS;
-  if (!raw) return 120_000;
+function timeoutMs(
+  envName = "KARTA_TIMEOUT_MS",
+  defaultValue = 120_000,
+): number {
+  const raw = process.env[envName];
+  if (!raw) return defaultValue;
   const parsed = Number(raw);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : 120_000;
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : defaultValue;
 }
 
 function topK(value: unknown): string {
   const parsed = Number(value ?? 5);
-  const clamped = Math.max(1, Math.min(100, Number.isFinite(parsed) ? Math.trunc(parsed) : 5));
+  const clamped = Math.max(
+    1,
+    Math.min(100, Number.isFinite(parsed) ? Math.trunc(parsed) : 5),
+  );
   return String(clamped);
 }
 
@@ -52,7 +63,12 @@ function envFlag(name: string, defaultValue: boolean): boolean {
   return !["0", "false", "no", "off"].includes(raw.toLowerCase());
 }
 
-function envInt(name: string, defaultValue: number, min: number, max: number): number {
+function envInt(
+  name: string,
+  defaultValue: number,
+  min: number,
+  max: number,
+): number {
   const parsed = Number(process.env[name]);
   if (!Number.isFinite(parsed)) return defaultValue;
   return Math.max(min, Math.min(max, Math.trunc(parsed)));
@@ -77,7 +93,10 @@ function extractHardTokens(text: string): string[] {
   return [...tokens].slice(0, 24);
 }
 
-function buildAutoContextQuery(prompt: string, cwd: string | undefined): string {
+function buildAutoContextQuery(
+  prompt: string,
+  cwd: string | undefined,
+): string {
   const hardTokens = extractHardTokens(prompt);
   const suffixParts = [
     cwd ? `cwd:${cwd}` : undefined,
@@ -90,7 +109,10 @@ function buildAutoContextQuery(prompt: string, cwd: string | undefined): string 
   }
 
   const ellipsis = "\n…[query truncated]";
-  const promptBudget = Math.max(0, MAX_AUTO_CONTEXT_QUERY_CHARS - suffix.length - ellipsis.length);
+  const promptBudget = Math.max(
+    0,
+    MAX_AUTO_CONTEXT_QUERY_CHARS - suffix.length - ellipsis.length,
+  );
   if (promptBudget > 0) {
     return `${prompt.slice(0, promptBudget).trimEnd()}${ellipsis}${suffix}`;
   }
@@ -107,16 +129,23 @@ function getStringField(value: unknown, field: string): string | undefined {
 function getNumberField(value: unknown, field: string): number | undefined {
   if (!value || typeof value !== "object") return undefined;
   const fieldValue = (value as JsonObject)[field];
-  return typeof fieldValue === "number" && Number.isFinite(fieldValue) ? fieldValue : undefined;
+  return typeof fieldValue === "number" && Number.isFinite(fieldValue)
+    ? fieldValue
+    : undefined;
 }
 
-function formatAutoContext(result: JsonObject, maxChars: number): string | undefined {
-  const data = result.data && typeof result.data === "object" ? (result.data as JsonObject) : undefined;
+function formatAutoContext(
+  result: JsonObject,
+  maxChars: number,
+): string | undefined {
+  const data = result.data && typeof result.data === "object"
+    ? (result.data as JsonObject)
+    : undefined;
   const hits = Array.isArray(data?.results)
     ? data.results
     : Array.isArray(result.results)
-      ? result.results
-      : [];
+    ? result.results
+    : [];
   const blocks: string[] = [];
 
   for (const hit of hits) {
@@ -130,10 +159,13 @@ function formatAutoContext(result: JsonObject, maxChars: number): string | undef
     if (!content?.trim()) continue;
 
     const score = getNumberField(hitObject, "score");
-    const updatedAt = getStringField(note, "updated_at") ?? getStringField(note, "created_at");
+    const updatedAt = getStringField(note, "updated_at") ??
+      getStringField(note, "created_at");
     const provenance = getStringField(note, "provenance");
     const keywords = Array.isArray((note as JsonObject).keywords)
-      ? ((note as JsonObject).keywords as unknown[]).filter((item): item is string => typeof item === "string").slice(0, 6)
+      ? ((note as JsonObject).keywords as unknown[]).filter((
+        item,
+      ): item is string => typeof item === "string").slice(0, 6)
       : [];
 
     const metadata = [
@@ -146,7 +178,11 @@ function formatAutoContext(result: JsonObject, maxChars: number): string | undef
       .filter(Boolean)
       .join("; ");
 
-    blocks.push(`- ${metadata}\n  ${truncateText(content.replace(/\s+/g, " ").trim(), 700)}`);
+    blocks.push(
+      `- ${metadata}\n  ${
+        truncateText(content.replace(/\s+/g, " ").trim(), 700)
+      }`,
+    );
   }
 
   if (!blocks.length) return undefined;
@@ -163,38 +199,70 @@ function formatAutoContext(result: JsonObject, maxChars: number): string | undef
   );
 }
 
-async function runKarta(args: string[], signal?: AbortSignal): Promise<JsonObject> {
+async function runKarta(
+  args: string[],
+  signal?: AbortSignal,
+  commandTimeoutMs = timeoutMs(),
+): Promise<JsonObject> {
   const fullArgs = ["--json", ...args];
   const options = {
     env: process.env,
     maxBuffer: 10 * 1024 * 1024,
-    timeout: timeoutMs(),
+    timeout: commandTimeoutMs,
     signal,
   };
 
   try {
-    // If KARTA_BIN is set, use that binary. Otherwise, default to the workspace
-    // crate so the extension works immediately from a Karta checkout.
+    // If KARTA_BIN is set, use that binary. Otherwise, prefer an installed
+    // `karta` on PATH, falling back to the workspace crate for checkout-local use.
     const command = process.env.KARTA_BIN;
-    const result = command
-      ? await execFileAsync(command, fullArgs, options)
-      : await execFileAsync("cargo", ["run", "-q", "-p", "karta-cli", "--", ...fullArgs], options);
+    if (command) {
+      const result = await execFileAsync(command, fullArgs, options);
+      return parseKartaJson(result.stdout, "stdout");
+    }
 
+    try {
+      const result = await execFileAsync("karta", fullArgs, options);
+      return parseKartaJson(result.stdout, "stdout");
+    } catch (error) {
+      if (!isCommandNotFound(error)) throw error;
+    }
+
+    const result = await execFileAsync("cargo", [
+      "run",
+      "-q",
+      "-p",
+      "karta-cli",
+      "--",
+      ...fullArgs,
+    ], options);
     return parseKartaJson(result.stdout, "stdout");
   } catch (error) {
     throw normalizeKartaError(error);
   }
 }
 
-function parseKartaJson(output: string | undefined, streamName: string): JsonObject {
+function parseKartaJson(
+  output: string | undefined,
+  streamName: string,
+): JsonObject {
   const text = output?.trim();
   if (!text) throw new Error(`karta returned empty ${streamName}`);
 
   try {
     return JSON.parse(text) as JsonObject;
   } catch (error) {
-    throw new Error(`failed to parse karta JSON from ${streamName}: ${(error as Error).message}\n${streamName}:\n${text}`);
+    throw new Error(
+      `failed to parse karta JSON from ${streamName}: ${
+        (error as Error).message
+      }\n${streamName}:\n${text}`,
+    );
   }
+}
+
+function isCommandNotFound(error: unknown): boolean {
+  const failure = error as ExecFileFailure & { code?: unknown };
+  return failure.code === "ENOENT";
 }
 
 function normalizeKartaError(error: unknown): Error {
@@ -204,19 +272,27 @@ function normalizeKartaError(error: unknown): Error {
     return new Error("karta command cancelled");
   }
 
-  for (const [streamName, output] of [
-    ["stderr", failure.stderr],
-    ["stdout", failure.stdout],
-  ] as const) {
+  for (
+    const [streamName, output] of [
+      ["stderr", failure.stderr],
+      ["stdout", failure.stdout],
+    ] as const
+  ) {
     const text = output?.trim();
     if (!text) continue;
 
     try {
       const payload = JSON.parse(text) as JsonObject;
-      if (payload && payload.ok === false && typeof payload.error === "string") {
+      if (
+        payload && payload.ok === false && typeof payload.error === "string"
+      ) {
         return new Error(payload.error);
       }
-      return new Error(`karta failed with JSON payload on ${streamName}: ${JSON.stringify(payload)}`);
+      return new Error(
+        `karta failed with JSON payload on ${streamName}: ${
+          JSON.stringify(payload)
+        }`,
+      );
     } catch {
       // Not JSON; fall through to stderr/stdout text below.
     }
@@ -252,8 +328,12 @@ function toolResult(result: JsonObject) {
 }
 
 export default function (pi: ExtensionAPI) {
+  let autoContextPausedUntil = 0;
+
   pi.on("session_start", async (_event, ctx) => {
-    const mode = process.env.KARTA_BIN ? "Karta memory" : "Karta memory (cargo)";
+    const mode = process.env.KARTA_BIN
+      ? "Karta memory (KARTA_BIN)"
+      : "Karta memory";
     const auto = envFlag("KARTA_AUTO_CONTEXT", true) ? ", auto-context" : "";
     ctx.ui.setStatus("karta", `${mode}${auto}`);
   });
@@ -261,12 +341,39 @@ export default function (pi: ExtensionAPI) {
   pi.on("before_agent_start", async (event, ctx) => {
     if (!envFlag("KARTA_AUTO_CONTEXT", true)) return;
 
-    const topKValue = envInt("KARTA_AUTO_CONTEXT_TOP_K", AUTO_CONTEXT_DEFAULT_TOP_K, 1, 20);
-    const maxChars = envInt("KARTA_AUTO_CONTEXT_MAX_CHARS", AUTO_CONTEXT_DEFAULT_MAX_CHARS, 500, 20_000);
-    const query = buildAutoContextQuery(event.prompt, event.systemPromptOptions.cwd);
+    const now = Date.now();
+    if (now < autoContextPausedUntil) return;
+
+    const topKValue = envInt(
+      "KARTA_AUTO_CONTEXT_TOP_K",
+      AUTO_CONTEXT_DEFAULT_TOP_K,
+      1,
+      20,
+    );
+    const maxChars = envInt(
+      "KARTA_AUTO_CONTEXT_MAX_CHARS",
+      AUTO_CONTEXT_DEFAULT_MAX_CHARS,
+      500,
+      20_000,
+    );
+    const autoTimeout = timeoutMs("KARTA_AUTO_CONTEXT_TIMEOUT_MS", 10_000);
+    const cooldownMs = envInt(
+      "KARTA_AUTO_CONTEXT_COOLDOWN_MS",
+      60_000,
+      0,
+      3_600_000,
+    );
+    const query = buildAutoContextQuery(
+      event.prompt,
+      event.systemPromptOptions.cwd,
+    );
 
     try {
-      const result = await runKarta(["search", "--query", query, "--top-k", String(topKValue)], ctx.signal);
+      const result = await runKarta(
+        ["search", "--query", query, "--top-k", String(topKValue)],
+        ctx.signal,
+        autoTimeout,
+      );
       const content = formatAutoContext(result, maxChars);
       if (!content) return;
 
@@ -278,7 +385,13 @@ export default function (pi: ExtensionAPI) {
         },
       };
     } catch (error) {
-      ctx.ui.notify(`Karta auto-context failed: ${(error as Error).message}`, "warning");
+      autoContextPausedUntil = Date.now() + cooldownMs;
+      ctx.ui.notify(
+        `Karta auto-context unavailable; continuing without it${
+          cooldownMs ? ` (retrying in ${Math.round(cooldownMs / 1000)}s)` : ""
+        }: ${(error as Error).message}`,
+        "warning",
+      );
     }
   });
 
@@ -290,23 +403,51 @@ export default function (pi: ExtensionAPI) {
     promptSnippet: "Store durable project memory in Karta.",
     promptGuidelines: KARTA_USAGE_GUIDELINES,
     parameters: Type.Object({
-      content: Type.String({ description: "The durable memory content to store." }),
-      session_id: Type.Optional(Type.String({ description: "Optional session/workspace grouping ID." })),
-      turn_index: Type.Optional(Type.Integer({ minimum: 0, description: "Optional source conversation turn index. Requires session_id." })),
-      source_timestamp: Type.Optional(Type.String({ description: "Optional RFC3339 source timestamp. Requires session_id." })),
+      content: Type.String({
+        description: "The durable memory content to store.",
+      }),
+      session_id: Type.Optional(
+        Type.String({ description: "Optional session/workspace grouping ID." }),
+      ),
+      turn_index: Type.Optional(
+        Type.Integer({
+          minimum: 0,
+          description:
+            "Optional source conversation turn index. Requires session_id.",
+        }),
+      ),
+      source_timestamp: Type.Optional(
+        Type.String({
+          description:
+            "Optional RFC3339 source timestamp. Requires session_id.",
+        }),
+      ),
     }),
     async execute(_toolCallId, params, signal) {
-      if ((params.turn_index !== undefined || params.source_timestamp) && !params.session_id) {
-        throw new Error("session_id is required when turn_index or source_timestamp is provided");
+      if (
+        (params.turn_index !== undefined || params.source_timestamp) &&
+        !params.session_id
+      ) {
+        throw new Error(
+          "session_id is required when turn_index or source_timestamp is provided",
+        );
       }
-      if (params.turn_index !== undefined && (!Number.isFinite(params.turn_index) || !Number.isInteger(params.turn_index) || params.turn_index < 0)) {
+      if (
+        params.turn_index !== undefined &&
+        (!Number.isFinite(params.turn_index) ||
+          !Number.isInteger(params.turn_index) || params.turn_index < 0)
+      ) {
         throw new Error("turn_index must be a non-negative integer");
       }
 
       const args = ["add-note", "--content", params.content];
       if (params.session_id) args.push("--session-id", params.session_id);
-      if (params.turn_index !== undefined) args.push("--turn-index", String(params.turn_index));
-      if (params.source_timestamp) args.push("--source-timestamp", params.source_timestamp);
+      if (params.turn_index !== undefined) {
+        args.push("--turn-index", String(params.turn_index));
+      }
+      if (params.source_timestamp) {
+        args.push("--source-timestamp", params.source_timestamp);
+      }
       return toolResult(await runKarta(args, signal));
     },
   });
@@ -320,25 +461,51 @@ export default function (pi: ExtensionAPI) {
     promptGuidelines: KARTA_USAGE_GUIDELINES,
     parameters: Type.Object({
       query: Type.String({ description: "Search query." }),
-      top_k: Type.Optional(Type.Number({ description: "Number of memories to return, 1-100. Defaults to 5." })),
+      top_k: Type.Optional(
+        Type.Number({
+          description: "Number of memories to return, 1-100. Defaults to 5.",
+        }),
+      ),
     }),
     async execute(_toolCallId, params, signal) {
-      return toolResult(await runKarta(["search", "--query", params.query, "--top-k", topK(params.top_k)], signal));
+      return toolResult(
+        await runKarta([
+          "search",
+          "--query",
+          params.query,
+          "--top-k",
+          topK(params.top_k),
+        ], signal),
+      );
     },
   });
 
   pi.registerTool({
     name: "karta_ask",
     label: "Karta: Ask",
-    description: "Ask Karta a question against stored memories and get a synthesized answer with retrieval metadata.",
+    description:
+      "Ask Karta a question against stored memories and get a synthesized answer with retrieval metadata.",
     promptSnippet: "Ask Karta for a synthesized answer from durable memory.",
     promptGuidelines: KARTA_USAGE_GUIDELINES,
     parameters: Type.Object({
       query: Type.String({ description: "Question to ask Karta." }),
-      top_k: Type.Optional(Type.Number({ description: "Number of context notes to consider, 1-100. Defaults to 5." })),
+      top_k: Type.Optional(
+        Type.Number({
+          description:
+            "Number of context notes to consider, 1-100. Defaults to 5.",
+        }),
+      ),
     }),
     async execute(_toolCallId, params, signal) {
-      return toolResult(await runKarta(["ask", "--query", params.query, "--top-k", topK(params.top_k)], signal));
+      return toolResult(
+        await runKarta([
+          "ask",
+          "--query",
+          params.query,
+          "--top-k",
+          topK(params.top_k),
+        ], signal),
+      );
     },
   });
 
@@ -351,7 +518,9 @@ export default function (pi: ExtensionAPI) {
       id: Type.String({ description: "Note ID." }),
     }),
     async execute(_toolCallId, params, signal) {
-      return toolResult(await runKarta(["get-note", "--id", params.id], signal));
+      return toolResult(
+        await runKarta(["get-note", "--id", params.id], signal),
+      );
     },
   });
 
@@ -385,13 +554,27 @@ export default function (pi: ExtensionAPI) {
     promptSnippet: "Run Karta background reasoning over the memory graph.",
     promptGuidelines: KARTA_USAGE_GUIDELINES,
     parameters: Type.Object({
-      scope_type: Type.Optional(Type.String({ description: "Dream scope type. Defaults to workspace." })),
-      scope_id: Type.Optional(Type.String({ description: "Dream scope identifier. Defaults to default." })),
+      scope_type: Type.Optional(
+        Type.String({
+          description: "Dream scope type. Defaults to workspace.",
+        }),
+      ),
+      scope_id: Type.Optional(
+        Type.String({
+          description: "Dream scope identifier. Defaults to default.",
+        }),
+      ),
     }),
     async execute(_toolCallId, params, signal) {
       return toolResult(
         await runKarta(
-          ["dream", "--scope-type", params.scope_type ?? "workspace", "--scope-id", params.scope_id ?? "default"],
+          [
+            "dream",
+            "--scope-type",
+            params.scope_type ?? "workspace",
+            "--scope-id",
+            params.scope_id ?? "default",
+          ],
           signal,
         ),
       );
@@ -405,7 +588,10 @@ export default function (pi: ExtensionAPI) {
         const result = await runKarta(["health"]);
         ctx.ui.notify(`Karta health: ${JSON.stringify(result)}`, "success");
       } catch (error) {
-        ctx.ui.notify(`Karta health failed: ${(error as Error).message}`, "error");
+        ctx.ui.notify(
+          `Karta health failed: ${(error as Error).message}`,
+          "error",
+        );
       }
     },
   });
