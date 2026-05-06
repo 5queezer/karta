@@ -158,10 +158,23 @@ karta/
 ## Development
 
 ```bash
+# Install the CLI
+./install.sh
+
 # Use the CLI (requires LLM credentials for commands that write/search/ask)
+karta --help
 cargo run -p karta-cli -- --help
 cargo run -p karta-cli -- --json add-note --content "Sarah prefers Slack notifications"
 cargo run -p karta-cli -- --json search --query "Sarah notification preferences" --top-k 5
+
+# Install Karta into AI clients
+# claude: skill + global CLAUDE.md + project UserPromptSubmit hook
+# codex: skill + AGENTS.md + project hooks.json/config.toml
+# gemini: skill + GEMINI.md + project BeforeAgent hook
+# pi: skill + global pi extension
+# hermes: skill (Hermes exposes skills as the integration surface)
+karta install --platform claude   # also: codex, gemini, hermes, pi
+karta uninstall --platform claude
 
 # Run tests (mock LLM, no API keys needed)
 cargo test
@@ -180,9 +193,9 @@ CI gates on every PR: `cargo fmt --all -- --check`, `cargo clippy --workspace --
 
 ## Pi Integration
 
-This repository includes a project-local pi extension at `.pi/extensions/karta.ts`.
-When you run pi from the repository root, the extension registers Karta memory tools
-backed by the local CLI:
+This repository includes a pi extension at `.pi/extensions/karta.ts`.
+`./install.sh` installs or updates it globally at `~/.pi/agent/extensions/karta.ts`.
+When loaded, the extension registers Karta memory tools backed by the CLI:
 
 - `karta_add_note` — store durable memories
 - `karta_search` — semantic memory search
@@ -192,12 +205,12 @@ backed by the local CLI:
 - `karta_health` — check embedded store health
 - `karta_dream` — run background reasoning
 
-By default the extension shells out to `cargo run -q -p karta-cli -- --json ...`,
-so it works directly from a checkout. To use an installed binary instead:
+By default the extension uses `KARTA_BIN` when set, otherwise an installed `karta`
+on `PATH`, otherwise it falls back to `cargo run -q -p karta-cli -- --json ...`
+so it still works directly from a checkout.
 
 ```bash
-cargo install --path crates/karta-cli
-export KARTA_BIN=karta
+./install.sh
 pi
 ```
 

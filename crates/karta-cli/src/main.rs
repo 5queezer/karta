@@ -1,6 +1,9 @@
+mod installer;
+
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
+use installer::{Client, default_home_dir, install_client, parse_client, uninstall_client};
 use karta_core::{
     Karta,
     config::KartaConfig,
@@ -132,6 +135,20 @@ enum Commands {
 
     /// Preview what the forgetting engine would do without mutating data.
     PreviewForgetting,
+
+    /// Install Karta memory instructions for an AI client.
+    Install {
+        /// Target client: claude, codex, gemini, hermes, or pi.
+        #[arg(long = "platform", alias = "client", default_value = "claude", value_parser = parse_client)]
+        client: Client,
+    },
+
+    /// Remove Karta memory instructions for an AI client.
+    Uninstall {
+        /// Target client: claude, codex, gemini, hermes, or pi.
+        #[arg(long = "platform", alias = "client", default_value = "claude", value_parser = parse_client)]
+        client: Client,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -176,6 +193,12 @@ struct CountResponse {
     count: usize,
 }
 
+#[derive(Debug, Serialize)]
+struct InstallResponse {
+    client: String,
+    paths: Vec<String>,
+}
+
 #[tokio::main]
 async fn main() {
     dotenvy::dotenv().ok();
@@ -206,6 +229,66 @@ async fn main() {
 }
 
 async fn run(cli: Cli) -> Result<()> {
+    match &cli.command {
+        Commands::Install { client } => {
+            let home = default_home_dir()?;
+            let project = std::env::current_dir().context("failed to get current directory")?;
+            let paths = install_client(*client, &home, &project)?;
+            output(
+                cli.json,
+                OkResponse {
+                    ok: true,
+                    data: InstallResponse {
+                        client: client.as_str().to_string(),
+                        paths: paths
+                            .iter()
+                            .map(|path| path.display().to_string())
+                            .collect(),
+                    },
+                },
+                |response| {
+                    format!(
+                        "installed Karta for {}\n{}",
+                        response.data.client,
+                        response.data.paths.join("\n")
+                    )
+                },
+            )?;
+            return Ok(());
+        }
+        Commands::Uninstall { client } => {
+            let home = default_home_dir()?;
+            let project = std::env::current_dir().context("failed to get current directory")?;
+            let paths = uninstall_client(*client, &home, &project)?;
+            output(
+                cli.json,
+                OkResponse {
+                    ok: true,
+                    data: InstallResponse {
+                        client: client.as_str().to_string(),
+                        paths: paths
+                            .iter()
+                            .map(|path| path.display().to_string())
+                            .collect(),
+                    },
+                },
+                |response| {
+                    if response.data.paths.is_empty() {
+                        format!("Karta was not installed for {}", response.data.client)
+                    } else {
+                        format!(
+                            "uninstalled Karta for {}\n{}",
+                            response.data.client,
+                            response.data.paths.join("\n")
+                        )
+                    }
+                },
+            )?;
+            return Ok(());
+        }
+        _ => {}
+    }
+
     let karta = create_karta(&cli).await?;
 
     match cli.command {
@@ -477,6 +560,9 @@ async fn run(cli: Cli) -> Result<()> {
                     )
                 },
             )?;
+        }
+        Commands::Install { .. } | Commands::Uninstall { .. } => {
+            unreachable!("handled before Karta initialization")
         }
     }
 
