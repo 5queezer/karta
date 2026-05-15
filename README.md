@@ -101,6 +101,10 @@ model = "gpt-4o-mini"
 model = "claude-sonnet-4-6"
 
 # Reranker
+# Runtime provider via env: KARTA_RERANKER_PROVIDER=auto|jina|fastembed|llm|noop
+# FastEmbed is local/offline when built with --features fastembed-reranker.
+# CUDA attempt + CPU fallback requires --features fastembed-reranker-cuda.
+# Recalibrate abstention_threshold when switching providers; Jina and FastEmbed scores differ.
 [reranker]
 enabled = true
 abstention_threshold = 0.1

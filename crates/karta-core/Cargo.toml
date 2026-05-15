@@ -10,6 +10,8 @@ default = ["lance", "sqlite", "openai"]
 lance = ["dep:lancedb", "dep:arrow-array", "dep:arrow-schema"]
 sqlite = ["dep:rusqlite"]
 openai = ["dep:async-openai"]
+fastembed-reranker = ["dep:fastembed", "dep:ort"]
+fastembed-reranker-cuda = ["fastembed-reranker", "ort/cuda"]
 eval-harnesses = []
 
 [dependencies]
@@ -34,6 +36,8 @@ anyhow = "1"
 
 # HTTP client (for reranker APIs)
 reqwest = { version = "0.12", features = ["json"] }
+fastembed = { version = "5", optional = true, default-features = false, features = ["ort-download-binaries-native-tls", "hf-hub-native-tls"] }
+ort = { version = "=2.0.0-rc.12", optional = true, default-features = false, features = ["ndarray", "std", "api-24"] }
 
 # Logging
 tracing = "0.1"
