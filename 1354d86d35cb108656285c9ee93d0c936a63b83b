@@ -1,0 +1,13 @@
+problem: Add low-risk tool-surface parity for Karta MCP and Pi extension
+approach: Reused existing core APIs to add read-only MCP tools for list_notes, health_check, and preview_forgetting; added Pi get_links tool; tightened installer test coverage; verified with focused crate checks
+failed_paths:
+  - Exact in-place edit matching failed on the minified mcp.rs representation, so rewrote the file cleanly before formatting
+verification:
+  - cargo fmt --all
+  - cargo test -p karta-cli installer::tests:: -- --nocapture
+  - cargo test -p karta-server --bin karta-server --no-run
+workflow_learning: For generated/minified Rust sources in this repo, full-file rewrite plus fmt is often faster and safer than fragile exact-match edits
+related_files:
+  - crates/karta-server/src/mcp.rs
+  - .pi/extensions/karta.ts
+  - crates/karta-cli/src/installer.rs
