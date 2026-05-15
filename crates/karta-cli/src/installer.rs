@@ -521,7 +521,9 @@ mod tests {
         assert!(home.join(".pi/agent/skills/karta/SKILL.md").exists());
         let extension = home.join(".pi/agent/extensions/karta.ts");
         assert!(extension.exists());
-        assert!(read(&extension).contains("karta_add_note"));
+        let extension_text = read(&extension);
+        assert!(extension_text.contains("karta_add_note"));
+        assert!(extension_text.contains("karta_get_links"));
     }
 
     #[test]

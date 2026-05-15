@@ -1,21 +1,20 @@
 use std::sync::Arc;
 
+use karta_core::{
+    Karta,
+    note::{normalize_scope_id, normalize_scope_type, normalize_source_ref},
+};
 use rmcp::{
     ErrorData as McpError, ServerHandler, handler::server::router::tool::ToolRouter,
     handler::server::wrapper::Parameters, model::*, schemars, tool, tool_handler, tool_router,
 };
 use serde::Deserialize;
 
-use karta_core::{
-    Karta,
-    note::{normalize_scope_id, normalize_scope_type, normalize_source_ref},
-};
-
 // -- Tool parameter types --
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct AddNoteParams {
-    /// The content of the memory note to store
+    /// memory note to store
     pub content: String,
     /// Optional session ID for grouping related notes
     #[serde(default)]
@@ -123,6 +122,7 @@ impl KartaService {
                 .as_deref()
                 .is_some_and(|s| !s.trim().is_empty())
             || source_ref.is_some();
+
         let result = match (params.session_id.as_deref(), has_scope) {
             (Some(session_id), true) => {
                 self.karta
@@ -287,6 +287,21 @@ impl KartaService {
         }
     }
 
+    /// Return all stored memory notes.
+    #[tool(description = "Return all stored memory notes with full metadata.")]
+    async fn list_notes(&self) -> Result<CallToolResult, McpError> {
+        match self.karta.get_all_notes().await {
+            Ok(notes) => Ok(CallToolResult::success(vec![Content::text(
+                serde_json::to_string_pretty(&notes).unwrap_or_default(),
+            )])),
+            Err(e) => Err(McpError::new(
+                ErrorCode::INTERNAL_ERROR,
+                format!("List notes failed: {e}"),
+                None,
+            )),
+        }
+    }
+
     /// Get the total count of stored memory notes.
     #[tool(description = "Get the total count of stored memory notes.")]
     async fn note_count(&self) -> Result<CallToolResult, McpError> {
@@ -297,6 +312,36 @@ impl KartaService {
             Err(e) => Err(McpError::new(
                 ErrorCode::INTERNAL_ERROR,
                 format!("Count failed: {e}"),
+                None,
+            )),
+        }
+    }
+
+    /// Check Karta embedded store health and migration status.
+    #[tool(description = "Check Karta embedded store health and migration status.")]
+    async fn health_check(&self) -> Result<CallToolResult, McpError> {
+        match self.karta.health_check().await {
+            Ok(health) => Ok(CallToolResult::success(vec![Content::text(
+                serde_json::to_string_pretty(&health).unwrap_or_default(),
+            )])),
+            Err(e) => Err(McpError::new(
+                ErrorCode::INTERNAL_ERROR,
+                format!("Health check failed: {e}"),
+                None,
+            )),
+        }
+    }
+
+    /// Preview what the forgetting engine would do without mutating data.
+    #[tool(description = "Preview what the forgetting engine would do without mutating data.")]
+    async fn preview_forgetting(&self) -> Result<CallToolResult, McpError> {
+        match self.karta.preview_forgetting().await {
+            Ok(preview) => Ok(CallToolResult::success(vec![Content::text(
+                serde_json::to_string_pretty(&preview).unwrap_or_default(),
+            )])),
+            Err(e) => Err(McpError::new(
+                ErrorCode::INTERNAL_ERROR,
+                format!("Preview forgetting failed: {e}"),
                 None,
             )),
         }
@@ -369,20 +414,17 @@ impl KartaService {
 impl ServerHandler for KartaService {
     fn get_info(&self) -> ServerInfo {
         let icon_url = format!("{}/icon.svg", self.base_url);
-
-        ServerInfo::new(
-            ServerCapabilities::builder().enable_tools().build(),
-        )
-        .with_server_info(
-            Implementation::new("karta", env!("CARGO_PKG_VERSION"))
-                .with_title("Karta Memory Server")
-                .with_description("Agentic memory system that thinks, not just stores. Store, search, and reason over knowledge using LLM-enriched notes and graph-based retrieval.")
-                .with_icons(vec![
-                    Icon::new(icon_url)
-                        .with_mime_type("image/svg+xml")
-                        .with_sizes(vec!["any".into()]),
-                ]),
-        )
-        .with_instructions("Available tools: add_note (store a memory), search (semantic search), ask (RAG-powered Q&A), get_note (retrieve by ID), note_count (total notes), dream (background reasoning), get_links (linked note IDs)".to_string())
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_server_info(
+                Implementation::new("karta", env!("CARGO_PKG_VERSION"))
+                    .with_title("Karta Memory Server")
+                    .with_description("Agentic memory system that thinks, not just stores. Store, search, and reason over knowledge using LLM-enriched notes and graph-based retrieval.")
+                    .with_icons(vec![
+                        Icon::new(icon_url)
+                            .with_mime_type("image/svg+xml")
+                            .with_sizes(vec!["any".into()]),
+                    ]),
+            )
+            .with_instructions("Available tools: add_note (store a memory), search (semantic search), ask (RAG-powered Q&A), get_note (retrieve by ID), list_notes (all notes), note_count (total notes), health_check (store health), preview_forgetting (forgetting dry run), dream (background reasoning), get_links (linked note IDs)".to_string())
     }
 }

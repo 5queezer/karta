@@ -525,6 +525,21 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.registerTool({
+    name: "karta_get_links",
+    label: "Karta: Get Links",
+    description: "Get all note IDs linked to a given Karta memory note.",
+    promptSnippet: "Inspect links for a specific Karta memory note.",
+    parameters: Type.Object({
+      note_id: Type.String({ description: "Note ID to inspect." }),
+    }),
+    async execute(_toolCallId, params, signal) {
+      return toolResult(
+        await runKarta(["get-links", "--note-id", params.note_id], signal),
+      );
+    },
+  });
+
+  pi.registerTool({
     name: "karta_note_count",
     label: "Karta: Note Count",
     description: "Get the total count of stored Karta memory notes.",
