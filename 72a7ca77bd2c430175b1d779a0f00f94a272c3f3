@@ -1,0 +1,11 @@
+problem: Apply low-risk MCP best-practice improvements for clearer tool guidance and safer broad reads
+approach: Reworked karta-server MCP tool metadata, added bounded pagination for list_notes, centralized structured JSON CallToolResult helpers, and added focused unit tests for clamp/pagination behavior
+failed_paths:
+  - Initial unit test assumed an outdated MemoryNote::new signature and failed to compile
+verification:
+  - cargo fmt --all
+  - cargo test -p karta-server --bin karta-server --no-run
+  - cargo test -p karta-server mcp::tests -- --nocapture
+workflow_learning: For rmcp tool cleanup in this repo, returning CallToolResult::structured preserves text compatibility while adding structured_content and makes repeated JSON serialization paths much simpler
+related_files:
+  - crates/karta-server/src/mcp.rs
