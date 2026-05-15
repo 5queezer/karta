@@ -1,0 +1,19 @@
+problem: Add coherent tracked FastEmbed reranker support and wiring
+approach: Added optional fastembed/ort feature flags in core plus CLI/server passthrough, implemented provider selection and FastEmbed fallback logic, and documented runtime env configuration
+failed_paths:
+  - None in this workflow
+verification:
+  - cargo fmt --all --check
+  - cargo test -p karta-core --lib karta::tests -- --nocapture
+  - cargo test -p karta-core --features fastembed-reranker --lib --no-run
+  - cargo test -p karta-cli --features fastembed-reranker --no-run
+  - cargo test -p karta-server --features fastembed-reranker --bin karta-server --no-run
+workflow_learning: For optional runtime backends, verify both provider-selection behavior and feature-flag compile paths across dependent crates before shipping
+related_files:
+  - .env.example
+  - README.md
+  - crates/karta-cli/Cargo.toml
+  - crates/karta-core/Cargo.toml
+  - crates/karta-core/src/karta.rs
+  - crates/karta-core/src/rerank.rs
+  - crates/karta-server/Cargo.toml
