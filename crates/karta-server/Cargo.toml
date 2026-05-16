@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 description = "MCP server with OAuth 2.1 for karta agentic memory"
 
+[features]
+fastembed-reranker = ["karta-core/fastembed-reranker"]
+fastembed-reranker-cuda = ["karta-core/fastembed-reranker-cuda"]
+
 [dependencies]
 karta-core = { path = "../karta-core" }
 

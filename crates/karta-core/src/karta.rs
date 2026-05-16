@@ -10,6 +10,8 @@ use crate::forget::{ForgetEngine, ForgetPreview, ForgetRun};
 use crate::llm::LlmProvider;
 use crate::note::{MemoryNote, SearchResult};
 use crate::read::ReadEngine;
+#[cfg(feature = "fastembed-reranker")]
+use crate::rerank::FastEmbedReranker;
 use crate::rerank::{JinaReranker, LlmReranker, NoopReranker, Reranker};
 use crate::rules::{ProceduralRule, RuleContext, RuleEvaluation};
 use crate::rules_engine::RuleEngine;
@@ -24,6 +26,119 @@ pub struct Karta {
     graph_store: Arc<dyn GraphStore>,
     llm: Arc<dyn LlmProvider>,
     config: KartaConfig,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RerankerProvider {
+    Jina,
+    FastEmbed,
+    Llm,
+    Noop,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RerankerProviderSelection {
+    provider: RerankerProvider,
+    explicit: bool,
+}
+
+fn select_reranker_provider(
+    provider: Option<&str>,
+    jina_key: Option<&str>,
+) -> RerankerProviderSelection {
+    match provider.map(|p| p.trim().to_ascii_lowercase()) {
+        Some(p) if p == "jina" => RerankerProviderSelection {
+            provider: RerankerProvider::Jina,
+            explicit: true,
+        },
+        Some(p) if p == "fastembed" || p == "fast-embed" => RerankerProviderSelection {
+            provider: RerankerProvider::FastEmbed,
+            explicit: true,
+        },
+        Some(p) if p == "llm" => RerankerProviderSelection {
+            provider: RerankerProvider::Llm,
+            explicit: true,
+        },
+        Some(p) if p == "noop" || p == "none" || p == "off" => RerankerProviderSelection {
+            provider: RerankerProvider::Noop,
+            explicit: true,
+        },
+        Some(p) if p == "auto" || p.is_empty() => RerankerProviderSelection {
+            provider: if jina_key.is_some() {
+                RerankerProvider::Jina
+            } else {
+                RerankerProvider::FastEmbed
+            },
+            explicit: false,
+        },
+        Some(_) | None => RerankerProviderSelection {
+            provider: if jina_key.is_some() {
+                RerankerProvider::Jina
+            } else {
+                RerankerProvider::FastEmbed
+            },
+            explicit: false,
+        },
+    }
+}
+
+async fn create_reranker(
+    selection: RerankerProviderSelection,
+    jina_key: Option<&str>,
+    llm: Arc<dyn LlmProvider>,
+) -> Result<Arc<dyn Reranker>> {
+    match selection.provider {
+        RerankerProvider::Jina => {
+            if let Some(jina_key) = jina_key {
+                Ok(Arc::new(JinaReranker::new(jina_key)))
+            } else {
+                tracing::warn!(
+                    "KARTA_RERANKER_PROVIDER=jina but JINA_API_KEY is missing; falling back to LLM reranker"
+                );
+                Ok(Arc::new(LlmReranker::new(llm)))
+            }
+        }
+        RerankerProvider::FastEmbed => {
+            create_fastembed_reranker_or_fallback(llm, selection.explicit).await
+        }
+        RerankerProvider::Llm => Ok(Arc::new(LlmReranker::new(llm))),
+        RerankerProvider::Noop => Ok(Arc::new(NoopReranker)),
+    }
+}
+
+#[cfg(feature = "fastembed-reranker")]
+async fn create_fastembed_reranker_or_fallback(
+    llm: Arc<dyn LlmProvider>,
+    _explicit: bool,
+) -> Result<Arc<dyn Reranker>> {
+    match tokio::task::spawn_blocking(FastEmbedReranker::new).await {
+        Ok(Ok(reranker)) => Ok(Arc::new(reranker)),
+        Ok(Err(e)) => {
+            tracing::warn!(error = %e, "FastEmbed reranker unavailable; falling back to LLM reranker");
+            Ok(Arc::new(LlmReranker::new(llm)))
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "FastEmbed reranker init task failed; falling back to LLM reranker");
+            Ok(Arc::new(LlmReranker::new(llm)))
+        }
+    }
+}
+
+#[cfg(not(feature = "fastembed-reranker"))]
+async fn create_fastembed_reranker_or_fallback(
+    llm: Arc<dyn LlmProvider>,
+    explicit: bool,
+) -> Result<Arc<dyn Reranker>> {
+    if explicit {
+        return Err(crate::error::KartaError::Config(
+            "KARTA_RERANKER_PROVIDER=fastembed requires building with the fastembed-reranker feature".to_string(),
+        ));
+    }
+
+    tracing::warn!(
+        "Karta was built without the fastembed-reranker feature; falling back to LLM reranker"
+    );
+    Ok(Arc::new(LlmReranker::new(llm)))
 }
 
 impl Karta {
@@ -45,13 +160,13 @@ impl Karta {
             config.episode.clone(),
         );
 
-        // Create reranker based on config + available credentials
+        // Create reranker based on config + available credentials.
+        // KARTA_RERANKER_PROVIDER: auto|jina|fastembed|llm|noop
         let reranker: Arc<dyn Reranker> = if config.reranker.enabled {
-            if let Ok(jina_key) = std::env::var("JINA_API_KEY") {
-                Arc::new(JinaReranker::new(&jina_key))
-            } else {
-                Arc::new(LlmReranker::new(Arc::clone(&llm)))
-            }
+            let provider_env = std::env::var("KARTA_RERANKER_PROVIDER").ok();
+            let jina_key = std::env::var("JINA_API_KEY").ok();
+            let provider = select_reranker_provider(provider_env.as_deref(), jina_key.as_deref());
+            create_reranker(provider, jina_key.as_deref(), Arc::clone(&llm)).await?
         } else {
             Arc::new(NoopReranker)
         };
@@ -302,6 +417,9 @@ impl Karta {
         self.vector_store.get_all().await
     }
 
+    pub async fn list_notes_page(&self, offset: usize, limit: usize) -> Result<Vec<MemoryNote>> {
+        self.vector_store.list_notes_page(offset, limit).await
+    }
     pub async fn note_count(&self) -> Result<usize> {
         self.vector_store.count().await
     }
@@ -437,4 +555,33 @@ pub struct KartaHealth {
     pub schema_version: Option<String>,
     pub pending_migrations: Vec<String>,
     pub warnings: Vec<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn explicit_fastembed_provider_selects_fastembed() {
+        assert_eq!(
+            select_reranker_provider(Some("fastembed"), None).provider,
+            RerankerProvider::FastEmbed
+        );
+    }
+
+    #[test]
+    fn auto_provider_prefers_jina_when_api_key_is_present() {
+        assert_eq!(
+            select_reranker_provider(None, Some("jina_key")).provider,
+            RerankerProvider::Jina
+        );
+    }
+
+    #[test]
+    fn auto_provider_uses_fastembed_without_jina_key() {
+        assert_eq!(
+            select_reranker_provider(None, None).provider,
+            RerankerProvider::FastEmbed
+        );
+    }
 }

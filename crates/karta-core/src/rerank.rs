@@ -11,7 +11,14 @@
 
 use async_trait::async_trait;
 use std::sync::Arc;
+#[cfg(feature = "fastembed-reranker")]
+use std::sync::Mutex;
 use tracing::{debug, warn};
+
+#[cfg(feature = "fastembed-reranker")]
+use fastembed::{RerankInitOptions, RerankerModel, TextRerank};
+#[cfg(feature = "fastembed-reranker-cuda")]
+use ort::ep::CUDA;
 
 use crate::error::Result;
 use crate::llm::{ChatMessage, GenConfig, LlmProvider, Role};
@@ -327,5 +334,153 @@ impl Reranker for JinaReranker {
         );
 
         Ok(results)
+    }
+}
+
+/// Local FastEmbed reranker — cross-encoder scoring via ONNX Runtime.
+///
+/// fastembed-rs' reranker path uses ONNX Runtime. With the
+/// `fastembed-reranker-cuda` feature, `KARTA_RERANKER_DEVICE=auto|cuda` tries
+/// CUDA first and falls back to CPU on initialization failure. Without that
+/// feature, FastEmbed runs on CPU.
+#[cfg(feature = "fastembed-reranker")]
+pub struct FastEmbedReranker {
+    model: Arc<Mutex<TextRerank>>,
+}
+
+#[cfg(feature = "fastembed-reranker")]
+impl FastEmbedReranker {
+    pub fn new() -> Result<Self> {
+        let requested_device = std::env::var("KARTA_RERANKER_DEVICE")
+            .unwrap_or_else(|_| "auto".to_string())
+            .to_ascii_lowercase();
+        let model = match requested_device.as_str() {
+            "cuda" | "gpu" | "auto" => match try_new_cuda() {
+                Ok(model) => model,
+                Err(e) => {
+                    warn!(
+                        error = %e,
+                        requested_device,
+                        "FastEmbed CUDA reranker unavailable; falling back to CPU"
+                    );
+                    try_new_cpu()?
+                }
+            },
+            "cpu" => try_new_cpu()?,
+            other => {
+                warn!(
+                    requested_device = other,
+                    "Unknown KARTA_RERANKER_DEVICE; falling back to CPU"
+                );
+                try_new_cpu()?
+            }
+        };
+
+        Ok(Self {
+            model: Arc::new(Mutex::new(model)),
+        })
+    }
+}
+
+#[cfg(feature = "fastembed-reranker")]
+fn try_new_cpu() -> Result<TextRerank> {
+    let options =
+        RerankInitOptions::new(RerankerModel::BGERerankerBase).with_show_download_progress(false);
+    TextRerank::try_new(options)
+        .map_err(|e| crate::error::KartaError::Llm(format!("FastEmbed CPU init error: {e}")))
+}
+
+#[cfg(all(feature = "fastembed-reranker", feature = "fastembed-reranker-cuda"))]
+fn try_new_cuda() -> Result<TextRerank> {
+    let options = RerankInitOptions::new(RerankerModel::BGERerankerBase)
+        .with_show_download_progress(false)
+        .with_execution_providers(vec![CUDA::default().build().error_on_failure()]);
+    TextRerank::try_new(options)
+        .map_err(|e| crate::error::KartaError::Llm(format!("FastEmbed CUDA init error: {e}")))
+}
+
+#[cfg(all(
+    feature = "fastembed-reranker",
+    not(feature = "fastembed-reranker-cuda")
+))]
+fn try_new_cuda() -> Result<TextRerank> {
+    Err(crate::error::KartaError::Llm(
+        "binary was built without the fastembed-reranker-cuda feature".to_string(),
+    ))
+}
+
+#[cfg(feature = "fastembed-reranker")]
+#[async_trait]
+impl Reranker for FastEmbedReranker {
+    async fn rerank(
+        &self,
+        query: &str,
+        notes: Vec<(MemoryNote, f32)>,
+    ) -> Result<Vec<RerankedResult>> {
+        if notes.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let query = query.to_string();
+        let documents: Vec<String> = notes
+            .iter()
+            .map(|(note, _)| truncate_for_reranker(&note.content, 500))
+            .collect();
+        let model = Arc::clone(&self.model);
+
+        let fastembed_results = tokio::task::spawn_blocking(move || {
+            let mut model = model.lock().unwrap_or_else(|e| {
+                warn!("FastEmbed reranker mutex was poisoned; recovering inner model");
+                e.into_inner()
+            });
+            model
+                .rerank(query, documents, false, None)
+                .map_err(|e| crate::error::KartaError::Llm(format!("FastEmbed rerank error: {e}")))
+        })
+        .await
+        .map_err(|e| crate::error::KartaError::Llm(format!("FastEmbed task join error: {e}")))??;
+
+        let mut score_map: std::collections::HashMap<usize, f32> = std::collections::HashMap::new();
+        for r in fastembed_results {
+            score_map.insert(r.index, r.score);
+        }
+
+        let mut results: Vec<RerankedResult> = notes
+            .into_iter()
+            .enumerate()
+            .map(|(i, (note, vector_score))| RerankedResult {
+                note,
+                vector_score,
+                relevance_score: score_map.get(&i).copied().unwrap_or(0.0),
+            })
+            .collect();
+
+        results.sort_by(|a, b| {
+            b.relevance_score
+                .partial_cmp(&a.relevance_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        debug!(
+            scores = ?results.iter().map(|r| format!("{:.3}", r.relevance_score)).collect::<Vec<_>>(),
+            "FastEmbed reranked"
+        );
+
+        Ok(results)
+    }
+}
+
+#[cfg(feature = "fastembed-reranker")]
+fn truncate_for_reranker(content: &str, max_chars: usize) -> String {
+    if content.chars().count() > max_chars {
+        let end = content
+            .char_indices()
+            .take(max_chars)
+            .last()
+            .map(|(i, ch)| i + ch.len_utf8())
+            .unwrap_or(content.len());
+        format!("{}...", &content[..end])
+    } else {
+        content.to_string()
     }
 }

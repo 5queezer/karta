@@ -961,11 +961,13 @@ mod tests {
         // Minimal VectorStore that just tracks which ids got bumped (not asserted).
         #[derive(Default)]
         struct NopVec;
+
         #[async_trait]
         impl VectorStore for NopVec {
             async fn upsert(&self, _: &crate::note::MemoryNote) -> Result<()> {
                 Ok(())
             }
+
             async fn find_similar(
                 &self,
                 _: &[f32],
@@ -974,24 +976,38 @@ mod tests {
             ) -> Result<Vec<(crate::note::MemoryNote, f32)>> {
                 Ok(vec![])
             }
+
             async fn get(&self, _: &str) -> Result<Option<crate::note::MemoryNote>> {
                 Ok(None)
             }
+
             async fn get_many(&self, _: &[&str]) -> Result<Vec<crate::note::MemoryNote>> {
                 Ok(vec![])
             }
+
             async fn get_all(&self) -> Result<Vec<crate::note::MemoryNote>> {
                 Ok(vec![])
             }
+
+            async fn list_notes_page(
+                &self,
+                _: usize,
+                _: usize,
+            ) -> Result<Vec<crate::note::MemoryNote>> {
+                Ok(vec![])
+            }
+
             async fn delete(&self, _: &str) -> Result<()> {
                 Ok(())
             }
+
             async fn count(&self) -> Result<usize> {
                 Ok(0)
             }
         }
 
         let recorder = Arc::new(BumpRecorder::default());
+
         let ids = ["a".to_string(), "b".to_string(), "c".to_string()];
 
         // Exercise the batch default-impl directly via the GraphStore trait:
@@ -1002,6 +1018,7 @@ mod tests {
                 pairs.push((ids[i].as_str(), ids[j].as_str()));
             }
         }
+
         assert_eq!(pairs.len(), 3, "C(3,2) = 3 pairs");
 
         let gs: Arc<dyn GraphStore> = recorder.clone();
@@ -1009,6 +1026,7 @@ mod tests {
 
         let recorded = recorder.pairs.lock().unwrap();
         assert_eq!(recorded.len(), 3);
+
         // Default impl loops the single-pair method in the same order we passed.
         assert_eq!(recorded[0], ("a".into(), "b".into()));
         assert_eq!(recorded[1], ("a".into(), "c".into()));
