@@ -1,0 +1,19 @@
+problem: Finish PR #28 hardening for paged list_notes, bounded MCP reads, FastEmbed CI compile coverage, and docs
+approach: Wired Karta list_notes_page through core into Lance, switched MCP list_notes to count plus bounded page reads, added CI fastembed feature checks, documented FastEmbed runtime artifact caching, and normalized activate.rs formatting so fmt gates pass
+failed_paths:
+  - cargo fmt --check failed on a previously minified activate.rs test block and required normalization before shipping
+verification:
+  - cargo fmt --all --check
+  - cargo test -p karta-core --lib karta::tests -- --nocapture
+  - cargo test -p karta-server mcp::tests -- --nocapture
+  - cargo check -p karta-core --features fastembed-reranker --lib
+  - cargo check -p karta-cli --features fastembed-reranker
+  - cargo check -p karta-server --features fastembed-reranker --bin karta-server
+workflow_learning: For paginated MCP list endpoints here, verify backend bounded reads and total-count semantics together, then ensure optional feature paths are covered in CI compile checks
+related_files:
+  - .github/workflows/ci.yml
+  - README.md
+  - crates/karta-core/src/activate.rs
+  - crates/karta-core/src/karta.rs
+  - crates/karta-core/src/store/lance.rs
+  - crates/karta-server/src/mcp.rs
