@@ -102,7 +102,9 @@ model = "claude-sonnet-4-6"
 
 # Reranker
 # Runtime provider via env: KARTA_RERANKER_PROVIDER=auto|jina|fastembed|llm|noop
-# FastEmbed is local/offline when built with --features fastembed-reranker.
+# FastEmbed runs locally when built with --features fastembed-reranker, but the
+# first use may download model / ONNX Runtime artifacts unless they are already cached.
+# Pre-cache those assets in your image/host if you need fully offline startup.
 # CUDA attempt + CPU fallback requires --features fastembed-reranker-cuda.
 # Recalibrate abstention_threshold when switching providers; Jina and FastEmbed scores differ.
 [reranker]

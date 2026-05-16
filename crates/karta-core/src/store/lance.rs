@@ -759,6 +759,22 @@ impl crate::store::VectorStore for LanceVectorStore {
         Ok(all_notes)
     }
 
+    async fn list_notes_page(&self, offset: usize, limit: usize) -> Result<Vec<MemoryNote>> {
+        let table = self.get_table().await?;
+        let results = table
+            .query()
+            .limit(limit)
+            .offset(offset)
+            .execute()
+            .await
+            .map_err(|e| KartaError::VectorStore(e.to_string()))?;
+        let batches = Self::collect_batches(results).await?;
+        let mut notes = Vec::new();
+        for batch in &batches {
+            notes.extend(Self::batch_to_notes(batch)?);
+        }
+        Ok(notes)
+    }
     async fn delete(&self, id: &str) -> Result<()> {
         let table = self.get_table().await?;
         table

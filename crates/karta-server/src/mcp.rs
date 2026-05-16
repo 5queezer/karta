@@ -360,9 +360,20 @@ impl KartaService {
     ) -> Result<CallToolResult, McpError> {
         let limit = clamp_list_limit(params.limit);
         let offset = params.offset;
+        let total_count = self
+            .karta
+            .note_count()
+            .await
+            .map_err(|error| internal_error("List notes", error))?;
 
-        match self.karta.get_all_notes().await {
-            Ok(notes) => serialize_tool_result(paginate_notes(notes, offset, limit)),
+        match self.karta.list_notes_page(offset, limit).await {
+            Ok(notes) => serialize_tool_result({
+                let mut response = paginate_notes(notes, 0, limit);
+                response.total_count = total_count;
+                response.offset = offset;
+                response.has_more = offset.saturating_add(response.returned_count) < total_count;
+                response
+            }),
             Err(error) => Err(internal_error("List notes", error)),
         }
     }

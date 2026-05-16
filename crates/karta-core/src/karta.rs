@@ -417,6 +417,9 @@ impl Karta {
         self.vector_store.get_all().await
     }
 
+    pub async fn list_notes_page(&self, offset: usize, limit: usize) -> Result<Vec<MemoryNote>> {
+        self.vector_store.list_notes_page(offset, limit).await
+    }
     pub async fn note_count(&self) -> Result<usize> {
         self.vector_store.count().await
     }

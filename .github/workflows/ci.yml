@@ -56,6 +56,11 @@ jobs:
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      - name: fastembed feature compile coverage
+        run: |
+          cargo check -p karta-core --features fastembed-reranker --lib
+          cargo check -p karta-cli --features fastembed-reranker
+          cargo check -p karta-server --features fastembed-reranker --bin karta-server
       - name: nextest
         run: cargo nextest run --workspace --no-fail-fast
         env:
