@@ -28,6 +28,9 @@ pub trait VectorStore: Send + Sync {
 
     /// Get all notes (for dreaming). Use sparingly.
     async fn get_all(&self) -> Result<Vec<MemoryNote>>;
+    /// List a bounded page of notes for inspection flows.
+    /// Stores with native pagination should override this to avoid unbounded reads.
+    async fn list_notes_page(&self, offset: usize, limit: usize) -> Result<Vec<MemoryNote>>;
 
     /// Delete a note.
     async fn delete(&self, id: &str) -> Result<()>;

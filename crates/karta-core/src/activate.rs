@@ -958,40 +958,30 @@ mod tests {
             }
         }
 
-        // Minimal VectorStore that just tracks which ids got bumped (not asserted).
-        #[derive(Default)]
-        struct NopVec;
-        #[async_trait]
-        impl VectorStore for NopVec {
-            async fn upsert(&self, _: &crate::note::MemoryNote) -> Result<()> {
-                Ok(())
-            }
-            async fn find_similar(
-                &self,
-                _: &[f32],
-                _: usize,
-                _: &[&str],
-            ) -> Result<Vec<(crate::note::MemoryNote, f32)>> {
-                Ok(vec![])
-            }
-            async fn get(&self, _: &str) -> Result<Option<crate::note::MemoryNote>> {
-                Ok(None)
-            }
-            async fn get_many(&self, _: &[&str]) -> Result<Vec<crate::note::MemoryNote>> {
-                Ok(vec![])
-            }
-            async fn get_all(&self) -> Result<Vec<crate::note::MemoryNote>> {
-                Ok(vec![])
-            }
-            async fn delete(&self, _: &str) -> Result<()> {
-                Ok(())
-            }
-            async fn count(&self) -> Result<usize> {
-                Ok(0)
-            }
-        }
+ // Minimal VectorStore that just tracks which ids got bumped (not asserted).
+ #[derive(Default)]
+ struct NopVec;
+ #[async_trait]
+ impl VectorStore for NopVec {
+     async fn upsert(&self, _: &crate::note::MemoryNote) -> Result<()> { Ok(()) }
+     async fn find_similar(
+         &self,
+         _: &[f32],
+         _: usize,
+         _: &[&str],
+     ) -> Result<Vec<(crate::note::MemoryNote, f32)>> {
+         Ok(vec![])
+     }
+     async fn get(&self, _: &str) -> Result<Option<crate::note::MemoryNote>> { Ok(None) }
+     async fn get_many(&self, _: &[&str]) -> Result<Vec<crate::note::MemoryNote>> { Ok(vec![]) }
+     async fn get_all(&self) -> Result<Vec<crate::note::MemoryNote>> { Ok(vec![]) }
+     async fn list_notes_page(&self, _: usize, _: usize) -> Result<Vec<crate::note::MemoryNote>> { Ok(vec![]) }
+     async fn delete(&self, _: &str) -> Result<()> { Ok(()) }
+     async fn count(&self) -> Result<usize> { Ok(0) }
+ }
 
-        let recorder = Arc::new(BumpRecorder::default());
+ let recorder = Arc::new(BumpRecorder::default());
+
         let ids = ["a".to_string(), "b".to_string(), "c".to_string()];
 
         // Exercise the batch default-impl directly via the GraphStore trait:
