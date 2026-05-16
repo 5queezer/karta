@@ -1,0 +1,10 @@
+problem: Restore VectorStore::list_notes_page so the hardening branch compiles
+approach: Reintroduced the trait method, added the NopVec test double implementation, and cleaned the env example formatting
+verification:
+  - cargo check -p karta-core
+  - cargo check -p karta-server
+workflow_learning: When minified/generated Rust edits break trait exposure, inspect every VectorStore impl for missing required methods before chasing downstream errors
+related_files:
+  - crates/karta-core/src/store/traits.rs
+  - crates/karta-core/src/activate.rs
+  - .env.example
